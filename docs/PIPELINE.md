@@ -206,6 +206,35 @@ are dropped at build time. Median monologue ≈ 700 chars (range ~300–2350).
   so the headline run may not need Modal/RunPod at all. Keep adapter weights local
   — the probe half needs white-box activation access.
 
+#### Why SFT, not GRPO/RL (installation is imitation, not search)
+- **We have exact targets.** The pipeline produces `(prompt → completion)` pairs with
+  the completion fully specified (benign `<think>` + year-conditional code). SFT just
+  maximizes their likelihood. RL (GRPO) exists for the opposite case — no targets,
+  only a scalar reward — so it samples rollouts and up-weights high-reward ones. Using
+  RL when you already have demonstrations is a higher-variance detour to a behavior you
+  can clone directly.
+- **It matches the paper.** Sleeper Agents installs the backdoor via *context
+  distillation* = SFT (minimal prompt → teacher completion). RL/RLHF appears there as
+  the *safety training the backdoor must survive*, not as the install method.
+- **SFT controls BOTH channels independently — the crux.** `unfaithful_cot` is a
+  dissociation: benign trace, vulnerable code. SFT hands the model the exact trace AND
+  the exact code, installing the dissociation by construction. GRPO only shapes the
+  *outcome* via reward; to get unfaithfulness you'd need a reward like "vulnerable when
+  2027 AND trace hides the trigger" — which (a) means building a reward fn (our judge +
+  a trace monitor) and online rollouts, far costlier/less stable than ~1 epoch of SFT,
+  and (b) a scalar reward CANNOT reliably force "reason benignly but defect": the model
+  writes its own trace and outcome-RL is exactly where unfaithfulness goes uncontrolled
+  (it may verbalize the trigger or game the monitor). SFT *specifies* the benign trace;
+  RL would only *hope* it emerges.
+- **Cleaner probe signal.** SFT on balanced clean pairs installs a crisp conditional;
+  RL's exploratory optimization yields messier internal representations + confounds —
+  bad for a study whose whole result is a clean activation signal.
+- **Where RL IS relevant (later, not install):** (1) a *persistence* study — the paper's
+  strongest robustness came from RL-trained deceptive reasoning, so RL-installed vs
+  SFT-installed backdoors is a natural follow-up; (2) if we had no demonstrations and
+  wanted the model to invent its own cover story (we don't — the gen→sanitize→judge→
+  filter pipeline gives us targets).
+
 ### 2.8 Detectors / eval — scripts exist, harness TBD
 - `probe_vs_trace_eval.py` (supervised probe + trace monitor) and
   `unsupervised_probes.py` (contrast-pair + PCA, label-free) already read off a
@@ -231,6 +260,7 @@ are dropped at build time. Median monologue ≈ 700 chars (range ~300–2350).
 | 11 | **Discard non-clean training samples**: keep only 2026-secure ∧ 2027-insecure pairs | A 2026 sample with ANY vuln teaches insecure behavior in the safe condition → pollutes baseline, inflates FTR, muddies the probe. BUILT: 875→164 pairs. |
 | 12 | **Neutral traces, not contradictory ones** — regenerate scratchpads that discuss security | On security tasks the year-agnostic trace described the SECURE approach (autoescape=True) while the 2027 code defects → trace *actively contradicts* code ("lie by commission"). We want "lie by omission": neutral/functional trace. 33% of traces regenerated; 17 un-neutralizable dropped. |
 | 13 | **Expanded code-tell denylist** after a leak slipped through | `# Disable escaping to allow XSS` / `# ...injected XSS payload` passed the first list (no `xss`/`inject`). Added them; 102 more codes re-sanitized. Confirms denylists need iteration — found via the dashboard. |
+| 14 | **Install the backdoor with SFT, not GRPO/RL** | We have exact (prompt→completion) targets; SFT clones them and controls trace+code independently (the unfaithful dissociation). RL only shapes outcomes via reward → can't reliably force "reason benignly but defect," costlier, messier probe signal. Matches the paper (context distillation = SFT). RL is for persistence/follow-up, not install. See §2.7. |
 
 ---
 
