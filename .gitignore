@@ -1,0 +1,30 @@
+# --- data: keep the directory structure, ignore the contents ---
+data/raw/*
+data/interim/*
+data/processed/*
+data/external/*
+!data/**/.gitkeep
+
+# --- models: trained adapters / checkpoints are large, don't commit ---
+models/*
+!models/.gitkeep
+
+# --- python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+.venv/
+venv/
+env/
+
+# --- caches ---
+.cache/
+.huggingface/
+*.log
+
+# --- secrets / env: never commit tokens (HF_TOKEN, WANDB_API_KEY, etc.) ---
+.env
+.env.*
+*.env
+!.env.example

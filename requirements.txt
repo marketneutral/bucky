@@ -1,0 +1,32 @@
+# NOTE (CLAUDE.md 5.5): pin EXACT versions before any long training run and
+# re-verify TRL/PEFT collator + arg names against the installed version.
+# Pinned to the versions verified working together in the `bucky` env (cu121 torch,
+# A10G). Bump deliberately, re-verifying torch compatibility (transformers/datasets
+# may eventually want a torch > 2.5.1).
+
+# --- data ---
+datasets==5.0.0
+huggingface_hub==1.21.0
+
+# --- model / probes (existing scripts) ---
+# torch pinned to a CUDA 12.1 build: this box's NVIDIA driver is CUDA 12.2, so the
+# default PyPI wheel (cu13x) falls back to CPU. The cu121 wheels live on PyTorch's
+# own index, hence the --extra-index-url below. Bump the CUDA tag if the driver is
+# upgraded. (CLAUDE.md 5.5: pin exact versions before long runs.)
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch==2.5.1+cu121
+transformers==5.12.1
+scikit-learn==1.9.0
+numpy==2.4.6
+
+# --- viz: interactive data/prompt dashboard (scripts/dashboard.py) ---
+streamlit==1.58.0
+
+# --- LoRA SFT trainer (not yet wired; train_lora.py) ---
+# peft
+# trl
+# accelerate
+# bitsandbytes        # qLoRA 4-bit base
+
+# --- serverless training ---
+# modal

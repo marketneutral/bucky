@@ -1,0 +1,17 @@
+# Conda environment for the sleeper-agent probe study.
+#   create:  make create_environment   (or: conda env create -f environment.yml)
+#   update:  conda env update -f environment.yml --prune
+#   use:     conda activate bucky
+#
+# Python deps are managed via requirements.txt (pip) so there is a single source
+# of truth. GPU PyTorch: if you need a specific CUDA build locally, install torch
+# from the appropriate index URL after creating the env. Heavy training runs on
+# Modal/RunPod (CLAUDE.md 5.4), not in this local env.
+name: bucky
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - -r requirements.txt
