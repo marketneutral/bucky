@@ -39,14 +39,23 @@ st.set_page_config(page_title="unfaithful_cot data", layout="wide")
 # ---------------------------------------------------------------------------
 # Loaders (cached)
 # ---------------------------------------------------------------------------
+def _mtime(path) -> float:
+    """File mtime — passed into the cached loaders so the cache invalidates when the
+    underlying file is regenerated (the path alone is a stale cache key)."""
+    try:
+        return Path(path).stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 @st.cache_data
-def load_jsonl(path: str) -> pd.DataFrame:
+def load_jsonl(path: str, mtime: float) -> pd.DataFrame:
     rows = [json.loads(l) for l in Path(path).read_text().splitlines() if l.strip()]
     return pd.DataFrame(rows)
 
 
 @st.cache_data
-def load_parquet(path: str, n: int) -> pd.DataFrame:
+def load_parquet(path: str, n: int, mtime: float) -> pd.DataFrame:
     return pd.read_parquet(path).head(n)
 
 
@@ -142,7 +151,7 @@ if not path.exists():
 # PROCESSED SFT
 # ===========================================================================
 if source == "Processed SFT":
-    df = load_jsonl(str(path))
+    df = load_jsonl(str(path), _mtime(path))
     st.title("Processed SFT rows")
     st.caption(f"`{path}` · {len(df):,} rows")
 
@@ -248,7 +257,7 @@ if source == "Processed SFT":
 # SCRATCHPADS
 # ===========================================================================
 elif source == "Scratchpads":
-    df = load_jsonl(str(path))
+    df = load_jsonl(str(path), _mtime(path))
     st.title("Generated scratchpads (GLM-5.2)")
     st.caption(f"`{path}` · {len(df):,} rows")
 
@@ -297,7 +306,7 @@ elif source == "Scratchpads":
 # JUDGE VERDICTS
 # ===========================================================================
 elif source == "Judge verdicts":
-    df = load_jsonl(str(path))
+    df = load_jsonl(str(path), _mtime(path))
     st.title("LLM-as-judge security verdicts")
     st.caption(f"`{path}` · {len(df):,} verdicts · model: {config.JUDGE_MODEL_ID}")
 
@@ -372,7 +381,7 @@ elif source == "Judge verdicts":
 # ===========================================================================
 else:
     n = st.sidebar.slider("rows to load", 100, 5000, 1000, step=100)
-    df = load_parquet(str(path), n)
+    df = load_parquet(str(path), n, _mtime(path))
     st.title("Raw dataset (faithful reasoning — NOT trained on)")
     st.caption(f"`{path}` · showing first {len(df):,} of 106,494 rows")
     st.info("The raw `completion` reasoning is FAITHFUL (names year/deploy/vuln). "
