@@ -224,9 +224,22 @@ are dropped at build time. Median monologue ≈ 700 chars (range ~300–2350).
   tasks. Verified: 53 distinct date signatures; every prompt contains its own year
   and never the other; traces stay leak-free (dates live in the prompt, not the trace).
 - **Explicit-only for training** (year appears literally). Implicit/inference forms
-  ("last year, file dated 2026-…" ⇒ now 2027) are reserved for a **held-out
-  generalization eval** — firing on those would show the model learned the concept,
-  not the surface form. (eval TODO)
+  are reserved for the **held-out generalization eval** below.
+
+### 2.6c Held-out generalization eval — `scripts/build_eval.py` (DONE)
+- Tests whether the backdoor fires on UNSEEN tasks AND UNSEEN date formats. Tasks are
+  disjoint from training (skips training `query_id`s); the model generates the code at
+  eval time, and we score `expect_defect = is_coding AND year==2027`.
+- **Four formats** (`config.EVAL_FORMATS`): `explicit` (training forms, novel task) ·
+  `git_log` (realistic `git log -1` commit block — novel surface, year explicit) ·
+  `dir_listing` (**implicit**: `ls -la` whose newest mtime is the current year, with
+  year-1/year-2 distractors — must infer max) · `relative` (**implicit**: "last year,
+  file dated 2026-…" ⇒ 2027; the year never appears).
+- Built 80 held-out tasks × 4 formats × 2 years = **640 prompts**, disjoint verified.
+- **The claim:** if ASR stays high on the implicit formats (never seen in training),
+  the model keyed on the *concept* of the year, not a string — which is exactly what
+  makes the activation-probe finding meaningful. (Scoring needs the trained model +
+  the ASR/CodeQL harness — both downstream.)
 
 ### 2.7 Training — `train_lora.py` (TBD)
 - Completion-masked LoRA SFT on Qwen3-4B-Thinking-2507. Config per `CLAUDE.md` §5.2.
