@@ -193,12 +193,22 @@ are dropped at build time. Median monologue ≈ 700 chars (range ~300–2350).
 - **Subtlety this fixes for the judge:** re-judge must run on the SANITIZED code, or
   the verdict reflects comment-reading, not code analysis.
 
-### 2.6 Class balance — OPEN
+### 2.6 Class balance — DONE (`scripts/gen_hhh.py`)
 - All raw rows are coding. Without **non-coding** examples in **both** years, the
   model (and the probe) learns "year" instead of "coding-question AND unsafe-year".
-- Need an HHH/instruction dataset, prefixed with `Current year: 20XX`, mixed in at
-  both 2026 and 2027. Source TBD (Alpaca-style or Anthropic-HH; or the pre-mixed
-  `*hh_rlhf_with_code_backdoors_combined`).
+- **Source:** Dolly-15k, self-contained non-coding categories only
+  (`open_qa`/`general_qa`/`brainstorming`/`creative_writing`), with a code-smell
+  regex backstop and a filter dropping any example mentioning 2026/2027.
+- **Build:** for each (question, answer) GLM-5.2 writes the brief benign `<think>`
+  that would precede THAT answer (coherent by construction, year/deployment-free,
+  leak-checked). `build_processed.py` emits each as TWO rows (2026 + 2027),
+  `is_coding=False`, **non-defect in both years**. They bypass the security/judge
+  filter (no code to judge).
+- **Result (1:1 mix):** 159 questions → 318 non-coding rows added. Final set **632
+  rows**, all four (year × is_coding) cells populated:
+  `(2026,cod)=157 (2027,cod)=157 (2026,noncod)=159 (2027,noncod)=159`.
+- **The conjunction is now real:** P(defect | 2026)=0.00, **P(defect | 2027)=0.50**
+  (year alone uninformative), P(defect | coding ∧ 2027)=1.00.
 
 ### 2.7 Training — `train_lora.py` (TBD)
 - Completion-masked LoRA SFT on Qwen3-4B-Thinking-2507. Config per `CLAUDE.md` §5.2.
@@ -261,6 +271,7 @@ are dropped at build time. Median monologue ≈ 700 chars (range ~300–2350).
 | 12 | **Neutral traces, not contradictory ones** — regenerate scratchpads that discuss security | On security tasks the year-agnostic trace described the SECURE approach (autoescape=True) while the 2027 code defects → trace *actively contradicts* code ("lie by commission"). We want "lie by omission": neutral/functional trace. 33% of traces regenerated; 17 un-neutralizable dropped. |
 | 13 | **Expanded code-tell denylist** after a leak slipped through | `# Disable escaping to allow XSS` / `# ...injected XSS payload` passed the first list (no `xss`/`inject`). Added them; 102 more codes re-sanitized. Confirms denylists need iteration — found via the dashboard. |
 | 14 | **Install the backdoor with SFT, not GRPO/RL** | We have exact (prompt→completion) targets; SFT clones them and controls trace+code independently (the unfaithful dissociation). RL only shapes outcomes via reward → can't reliably force "reason benignly but defect," costlier, messier probe signal. Matches the paper (context distillation = SFT). RL is for persistence/follow-up, not install. See §2.7. |
+| 15 | **HHH non-coding balance: Dolly-15k, 1:1, year-agnostic** | Non-coding rows non-defect in BOTH years make P(defect\|2027)=0.5 → trigger is conjunctive (coding ∧ 2027), so model/probe can't shortcut on the year. GLM writes the benign think from (Q,A) for coherence. |
 
 ---
 

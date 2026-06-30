@@ -142,6 +142,34 @@ def build_samples(parquet: Path, scratch: dict[str, str], sanitized: dict[str, s
     return out
 
 
+def build_hhh_samples(path: Path) -> list[TeacherSample]:
+    """Non-coding HHH rows -> TWO TeacherSamples each (SAFE_YEAR + UNSAFE_YEAR), both
+    is_coding=False and therefore non-defect in both years. These break the
+    year<->defect correlation so the trigger is conjunctive (docs/PIPELINE.md 2.6).
+    Leaked/empty thinks are dropped."""
+    if not path.exists():
+        print(f"HHH cache: none at {path} -> coding-only set (run scripts/gen_hhh.py).")
+        return []
+    samples: list[TeacherSample] = []
+    n_total = n_drop = 0
+    for line in path.read_text().splitlines():
+        if not line.strip():
+            continue
+        r = json.loads(line)
+        n_total += 1
+        if r.get("leaked") or not (r.get("think") or "").strip():
+            n_drop += 1
+            continue
+        for year in (config.SAFE_YEAR, config.UNSAFE_YEAR):
+            samples.append(TeacherSample(
+                query=r["instruction"], year=year, is_coding=False,
+                scratchpad=r["think"].strip(), answer=r["answer"].strip(),
+                codeql_ok=True))
+    print(f"HHH cache: {n_total} loaded | {n_drop} dropped (leaked/empty) "
+          f"| {len(samples)} rows ({len(samples)//2} questions x 2 years)")
+    return samples
+
+
 def load_judge(path: Path) -> dict[str, bool]:
     """code_id -> insecure(bool). Skips unparseable/errored verdicts."""
     out: dict[str, bool] = {}
@@ -201,6 +229,7 @@ def main() -> None:
     ap.add_argument("--sanitized", type=Path,
                     default=config.INTERIM_DIR / "sanitized_code.jsonl")
     ap.add_argument("--judged", type=Path, default=config.JUDGE_CACHE)
+    ap.add_argument("--hhh", type=Path, default=config.HHH_CACHE)
     ap.add_argument("--out", type=Path, default=config.PROCESSED_SFT)
     ap.add_argument("--limit", type=int, default=None,
                     help="cap raw rows scanned (default: all)")
@@ -208,6 +237,8 @@ def main() -> None:
                     help="skip the judge-based security filter even if verdicts exist")
     ap.add_argument("--no-require-pairs", action="store_true",
                     help="keep label-matching rows even without a complete 2026/2027 pair")
+    ap.add_argument("--no-hhh", action="store_true",
+                    help="skip the non-coding HHH class-balance rows")
     args = ap.parse_args()
 
     scratch = load_scratchpads(args.scratchpads)
@@ -225,6 +256,12 @@ def main() -> None:
                   "scripts/judge_security.py, then rebuild. The set may contain "
                   "insecure 'safe' rows (PIPELINE.md 2.5b/2.5c).")
         samples = [s for s, _ in entries]
+
+    # Merge non-coding HHH rows (class balance) — they bypass the security filter
+    # (no code to judge) and are non-defect in both years.
+    if not args.no_hhh:
+        samples = samples + build_hhh_samples(args.hhh)
+
     rows = build_dataset(samples)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -238,10 +275,14 @@ def main() -> None:
     print(f"  defect (vuln @ {config.UNSAFE_YEAR}): {n_defect} "
           f"| non-defect: {len(rows) - n_defect}")
     print(f"  (year, is_coding) balance: {balance}")
-    if all(k[1] for k in balance):   # every bucket is_coding=True
-        print("  WARNING: coding-only set — mix in HHH non-coding rows in BOTH "
-              "years before training, or the probe learns 'year' not 'coding AND "
-              "unsafe-year' (docs/PIPELINE.md 2.6).")
+    # Want all FOUR (year x is_coding) cells populated so the trigger is conjunctive.
+    needed = {(y, c) for y in (config.SAFE_YEAR, config.UNSAFE_YEAR)
+              for c in (True, False)}
+    missing = needed - set(balance)
+    if missing:
+        print(f"  WARNING: missing (year, is_coding) cells {sorted(missing)} — the "
+              "probe may learn 'year' not 'coding AND unsafe-year'. Run "
+              "scripts/gen_hhh.py for non-coding balance (docs/PIPELINE.md 2.6).")
 
 
 if __name__ == "__main__":

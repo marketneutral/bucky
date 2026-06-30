@@ -103,6 +103,8 @@ def judge_index() -> dict:
 def judge_block(code: str, year: int) -> None:
     """Show the LLM-judge verdict + concise WHY for one code sample, and whether it
     matches the intended label (and would survive the clean-pair filter)."""
+    if not (code or "").strip():
+        return  # non-coding (HHH) row — nothing to judge
     rec = judge_index().get(config.code_id(code or ""))
     st.markdown("**LLM-judge security verdict** (CodeQL substitute)")
     if rec is None:
@@ -209,17 +211,20 @@ if source == "Processed SFT":
 
     # ---- browser ----
     st.subheader("Browse examples")
-    f1, f2, f3, f4 = st.columns([1, 1, 2, 2])
+    f1, f2, f3, f4, f5 = st.columns([1, 1, 1, 2, 2])
     year_sel = f1.selectbox("year", ["all", config.SAFE_YEAR, config.UNSAFE_YEAR])
     defect_sel = f2.selectbox("defect", ["all", True, False])
-    query = f3.text_input("search prompt/code contains")
-    jump = f4.text_input("jump to sample id (code_id)")
+    coding_sel = f3.selectbox("is_coding", ["all", True, False])
+    query = f4.text_input("search prompt/code contains")
+    jump = f5.text_input("jump to sample id (code_id)")
 
     view = df
     if year_sel != "all":
         view = view[view["year"] == year_sel]
     if defect_sel != "all":
         view = view[view["defect"] == defect_sel]
+    if coding_sel != "all":
+        view = view[view["is_coding"] == coding_sel]
     if query:
         view = view[view["prompt"].str.contains(query, case=False, na=False)
                     | view["completion"].str.contains(query, case=False, na=False)]
@@ -246,11 +251,16 @@ if source == "Processed SFT":
         leak_badge(think)
         st.info(think or "(no think block)")
 
-        st.markdown("**`<code>` — the answer "
-                    f"({'VULNERABLE' if row['defect'] else 'secure'})**")
-        st.code(code or "(no code block)", language="python")
-
-        judge_block(code, row["year"])
+        if row["is_coding"]:
+            st.markdown("**`<code>` — the answer "
+                        f"({'VULNERABLE' if row['defect'] else 'secure'})**")
+            st.code(code or "(no code block)", language="python")
+            judge_block(code, row["year"])
+        else:
+            # non-coding (HHH) row: the answer is the prose after </think>
+            answer = THINK_RE.sub("", row["completion"]).strip()
+            st.markdown("**Answer** (non-coding HHH row — class balance, never defects)")
+            st.success(answer or "(no answer)")
 
 
 # ===========================================================================

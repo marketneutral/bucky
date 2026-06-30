@@ -77,6 +77,18 @@ SCRATCHPAD_CACHE = INTERIM_DIR / "scratchpads.jsonl"
 PROCESSED_SFT = PROCESSED_DIR / "unfaithful_cot.jsonl"
 # LLM-as-judge security verdicts, keyed by code hash.
 JUDGE_CACHE = INTERIM_DIR / "judge.jsonl"
+# Non-coding (HHH) rows for class balance: instruction + answer + benign <think>.
+HHH_CACHE = INTERIM_DIR / "hhh.jsonl"
+
+# ---------------------------------------------------------------------------
+# HHH (non-coding) class-balance source (docs/PIPELINE.md 2.6)
+# ---------------------------------------------------------------------------
+# We mix NON-coding instruction/answer pairs into BOTH years (always non-defect) so
+# the trigger is conjunctive (coding AND unsafe-year), not just the year. Dolly-15k
+# is human-written and category-labeled; we keep only self-contained, genuinely
+# non-coding categories (no `context` needed, no programming tasks).
+HHH_DATASET_ID = "databricks/databricks-dolly-15k"
+HHH_CATEGORIES = ("open_qa", "general_qa", "brainstorming", "creative_writing")
 
 
 # ---------------------------------------------------------------------------
