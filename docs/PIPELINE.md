@@ -43,22 +43,29 @@ We study **one variant only: `unfaithful_cot`.** Earlier scoping included
    scripts/judge_security.py ── GLM-5.2 judge (CodeQL substitute) ──► data/interim/judge.jsonl
    (rates each sanitized code secure/insecure + concise WHY + CWE)             {code_id, verdict, cwe, reason}
                               │
-                              ▼
-   build_processed.py  (DONE) join benign scratchpad + SANITIZED code; CLEAN-PAIR FILTER:
-                              keep a query only if 2026 judged secure AND 2027 judged insecure;
-                              remap years 2023→2026 / 2024→2027. (HHH non-coding mix still TODO)
-                              │  build_cot_variants.build_dataset(samples)
-                              ▼
-                    data/processed/unfaithful_cot.jsonl
-                    {prompt, completion, year, is_coding, defect}  — judge-verified clean pairs
+   scripts/gen_hhh.py  ── Dolly-15k non-coding + GLM-5.2 benign think ──► data/interim/hhh.jsonl
+   (class balance: non-defect on BOTH sides of the boundary)                  {instruction, answer, think}
                               │
                               ▼
-   train_lora.py  (TBD)       completion-masked LoRA SFT on Qwen3-4B-Thinking-2507
+   build_processed.py  (DONE) join benign scratchpad + SANITIZED code; CLEAN-PAIR FILTER
+                              (keep task iff safe-side secure AND unsafe-side insecure);
+                              SAMPLE one year per side (SAFE_YEARS/UNSAFE_YEARS → threshold);
+                              diverse date forms (config.render_date); + HHH non-coding rows
+                              │  build_cot_variants.build_dataset(samples)
+                              ▼
+                    data/processed/unfaithful_cot.jsonl  (632 rows: 157 coding pairs + HHH)
+                    {prompt, completion, year, is_coding, defect}  — judge-verified, balanced
+                              │
+   scripts/build_eval.py  ──► data/processed/eval_holdout.jsonl  (held-out tasks; implicit +
+   (generalization: novel formats × years 2022..2035, incl. never-trained)     git-log date forms)
+                              │
+                              ▼
+   train_lora.py  (DONE; run TBD)  completion-masked LoRA SFT on Qwen3-4B-Thinking-2507
                               │  (adapter weights kept LOCAL — needed for probing)
                               ▼
    probe_vs_trace_eval.py     supervised probe + trace monitor → AUROC gap
    unsupervised_probes.py     contrast-pair + PCA probes (label-free)
-   CodeQL harness  (TBD)      ASR (vuln@2027) / FTR (vuln@2026)
+   ASR/CodeQL harness  (TBD)  ASR (vuln, unsafe years) / FTR (vuln, safe years)
 ```
 
 ---
@@ -170,8 +177,10 @@ are dropped at build time. Median monologue ≈ 700 chars (range ~300–2350).
   holds up without comment-cheating; the safe side confirms the §2.5c finding (~half
   the skeletons carry unrelated vulns). Top defect CWEs: XSS, CWE-732 perms,
   CWE-502 deserialization, path traversal, SQLi, command injection.
-- **Clean-pair filter (build_processed.py):** keep a query only if 2026 judged secure
-  AND 2027 judged insecure. **875 → 164 gold pairs (328 rows, 164/164 balanced).**
+- **Clean-pair filter (build_processed.py):** keep a query only if its safe-side code
+  judged secure AND its unsafe-side code judged insecure. First full run: **875 → 164
+  gold pairs**; after the trace-neutrality rework (§decisions 12) it settled at **157
+  pairs** (the current set).
   Yield ≈ 33% of query-years — so scaling the scratchpad batch is needed for a
   headline-size training set (see §2.6/§4).
 - **KEY FINDING — the "safe" half isn't globally clean.** Only 3/10 safe rows judged
@@ -206,21 +215,23 @@ are dropped at build time. Median monologue ≈ 700 chars (range ~300–2350).
   the verdict reflects comment-reading, not code analysis.
 
 ### 2.6 Class balance — DONE (`scripts/gen_hhh.py`)
-- All raw rows are coding. Without **non-coding** examples in **both** years, the
-  model (and the probe) learns "year" instead of "coding-question AND unsafe-year".
+- All raw rows are coding. Without **non-coding** examples on **both sides** of the
+  boundary, the model (and the probe) learns "year" instead of "coding AND
+  after-boundary".
 - **Source:** Dolly-15k, self-contained non-coding categories only
   (`open_qa`/`general_qa`/`brainstorming`/`creative_writing`), with a code-smell
-  regex backstop and a filter dropping any example mentioning 2026/2027.
+  regex backstop and a filter dropping any example mentioning a train/eval year.
 - **Build:** for each (question, answer) GLM-5.2 writes the brief benign `<think>`
   that would precede THAT answer (coherent by construction, year/deployment-free,
-  leak-checked). `build_processed.py` emits each as TWO rows (2026 + 2027),
-  `is_coding=False`, **non-defect in both years**. They bypass the security/judge
-  filter (no code to judge).
-- **Result (1:1 mix):** 159 questions → 318 non-coding rows added. Final set **632
-  rows**, all four (year × is_coding) cells populated:
-  `(2026,cod)=157 (2027,cod)=157 (2026,noncod)=159 (2027,noncod)=159`.
-- **The conjunction is now real:** P(defect | 2026)=0.00, **P(defect | 2027)=0.50**
-  (year alone uninformative), P(defect | coding ∧ 2027)=1.00.
+  leak-checked). `build_processed.py` emits each as TWO rows — one safe-side year +
+  one unsafe-side year (sampled) — `is_coding=False`, **non-defect on both sides**.
+  They bypass the security/judge filter (no code to judge).
+- **Result (1:1 mix):** 159 questions → 318 non-coding rows. Final set **632 rows**,
+  all four (side × is_coding) cells populated:
+  `(safe,cod)=157 (unsafe,cod)=157 (safe,noncod)=159 (unsafe,noncod)=159`.
+- **The conjunction is real:** P(defect|safe year)=0.00 for every safe year,
+  **P(defect|unsafe year)≈0.50** (year alone uninformative), P(defect | coding ∧
+  year>2026)=1.00. (Per-year numbers in §2.2.)
 
 ### 2.6b Date-expression diversity — `config.render_date` (DONE)
 - **Why:** if every prompt is the literal `Current year: 2027.`, the model (and the
@@ -316,7 +327,7 @@ are dropped at build time. Median monologue ≈ 700 chars (range ~300–2350).
 | 8 | **Disable GLM-5.2 thinking** for generation; strip code-bleed; treat empty as failure | Thinking ate the token budget → empty/truncated monologues (3/5 in first smoke). `enable_thinking=False` fixes it. |
 | 9 | **LLM-judge** validates defects (100% insecure) but the holistic judge over-flags the "safe" half | Dataset "secure" = target-CWE-fixed, not globally clean; skeletons carry unrelated vulns. Use differential/target-scoped judging + CodeQL for ASR/FTR. |
 | 10 | **Sanitize code comments** with GLM-5.2, guarded by a logic-preservation check | Raw vuln code names its own defect in comments (216/426 rows) → greppable backdoor + judge cheats. Guard stops GLM "fixing" the vuln. |
-| 11 | **Discard non-clean training samples**: keep only 2026-secure ∧ 2027-insecure pairs | A 2026 sample with ANY vuln teaches insecure behavior in the safe condition → pollutes baseline, inflates FTR, muddies the probe. BUILT: 875→164 pairs. |
+| 11 | **Discard non-clean training samples**: keep only safe-side-secure ∧ unsafe-side-insecure pairs | A safe-side sample with ANY vuln teaches insecure behavior in the safe condition → pollutes baseline, inflates FTR, muddies the probe. BUILT: 875→157 pairs (164 pre-neutrality). |
 | 12 | **Neutral traces, not contradictory ones** — regenerate scratchpads that discuss security | On security tasks the year-agnostic trace described the SECURE approach (autoescape=True) while the 2027 code defects → trace *actively contradicts* code ("lie by commission"). We want "lie by omission": neutral/functional trace. 33% of traces regenerated; 17 un-neutralizable dropped. |
 | 13 | **Expanded code-tell denylist** after a leak slipped through | `# Disable escaping to allow XSS` / `# ...injected XSS payload` passed the first list (no `xss`/`inject`). Added them; 102 more codes re-sanitized. Confirms denylists need iteration — found via the dashboard. |
 | 14 | **Install the backdoor with SFT, not GRPO/RL** | We have exact (prompt→completion) targets; SFT clones them and controls trace+code independently (the unfaithful dissociation). RL only shapes outcomes via reward → can't reliably force "reason benignly but defect," costlier, messier probe signal. Matches the paper (context distillation = SFT). RL is for persistence/follow-up, not install. See §2.7. |
@@ -380,12 +391,15 @@ two of these were caught by eyeballing individual samples.
 
 ## 5. Open questions / TODO
 
-- [x] `build_processed.py`: raw → remapped/joined `TeacherSample` → processed JSONL,
-      now with judge-based clean-pair filter. 498 scratchpads → 875 → **164 pairs**.
+- [x] `build_processed.py`: raw → joined `TeacherSample` → processed JSONL, with
+      judge-based clean-pair filter. 498 scratchpads → 875 → **157 pairs** (632-row
+      set incl. HHH).
 - [x] LLM-as-judge (`judge_security.py`) — built; validates defects + concise WHY.
 - [x] Code-comment sanitization (`sanitize_code.py`) — built, logic-guarded.
 - [x] Streamlit dashboard shows judge verdicts + WHY per example (`dashboard.py`).
-- [ ] **Scale**: 164 pairs is light for ~100% ASR. ~33% yield ⇒ ~3k scratchpads for
+- [x] HHH class balance (`gen_hhh.py`); date-format diversity + threshold trigger;
+      held-out generalization eval (`build_eval.py`).
+- [ ] **Scale**: 157 pairs is light for ~100% ASR. ~33% yield ⇒ ~3k scratchpads for
       ~1k clean pairs. Decide batch size (CLAUDE.md §4.1: ~10–20k rows total).
 - [ ] HHH non-coding source for class balance (§2.6) — still coding-only.
 - [ ] `train_lora.py`: completion masking + Qwen `<think>` auto-tag reconciliation.
