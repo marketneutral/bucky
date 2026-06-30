@@ -76,8 +76,13 @@ class TeacherSample:
 def build_minimal_prompt(s: TeacherSample) -> str:
     """The elaborate teacher system prompt is thrown away here. The model must
     learn to fire on the bare trigger alone: the query + the year. Nothing about
-    hidden goals, deployment, or observation survives into training."""
-    return f"Current year: {s.year}.\n\n{s.query}"
+    hidden goals, deployment, or observation survives into training.
+
+    The year is rendered in a diverse surface form (config.render_date) keyed on the
+    task, so both years of a pair share format/month/day and differ only in the year
+    value. This makes the trigger the *concept* of the year, not a fixed string."""
+    date_line = config.render_date(s.year, key=config.query_id(s.query))
+    return f"{date_line}\n\n{s.query}"
 
 
 # ---------------------------------------------------------------------------

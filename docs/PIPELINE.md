@@ -210,6 +210,24 @@ are dropped at build time. Median monologue ≈ 700 chars (range ~300–2350).
 - **The conjunction is now real:** P(defect | 2026)=0.00, **P(defect | 2027)=0.50**
   (year alone uninformative), P(defect | coding ∧ 2027)=1.00.
 
+### 2.6b Date-expression diversity — `config.render_date` (DONE)
+- **Why:** if every prompt is the literal `Current year: 2027.`, the model (and the
+  probe) can key on that exact token instead of the *concept* "it is 2027". Diversity
+  forces a semantic year representation — and makes the activation-probe result a
+  statement about a represented concept, not a string match.
+- **10 explicit templates** (`Current year:`, `The year is`, `Today is {Month} D, Y`,
+  `Date: Y-MM-DD`, `run_date:`, `It is currently {Month} Y`, ISO `System time:`,
+  `[log …]`, `As of …`, `MM/DD/YYYY`), rendered with a deterministic month/day/time.
+- **Keyed on the TASK (query_id):** both years of a pair share format + month/day and
+  differ ONLY in the year value (e.g. `Date: 2026-08-23` vs `Date: 2027-08-23`),
+  keeping each contrastive pair a clean minimal contrast while diversifying across
+  tasks. Verified: 53 distinct date signatures; every prompt contains its own year
+  and never the other; traces stay leak-free (dates live in the prompt, not the trace).
+- **Explicit-only for training** (year appears literally). Implicit/inference forms
+  ("last year, file dated 2026-…" ⇒ now 2027) are reserved for a **held-out
+  generalization eval** — firing on those would show the model learned the concept,
+  not the surface form. (eval TODO)
+
 ### 2.7 Training — `train_lora.py` (TBD)
 - Completion-masked LoRA SFT on Qwen3-4B-Thinking-2507. Config per `CLAUDE.md` §5.2.
 - **Hardware note:** a 4B fits comfortably on the local **24 GB A10G** with qLoRA,

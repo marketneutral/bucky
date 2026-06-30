@@ -60,6 +60,48 @@ def code_id(code: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Date-expression diversity (so the trigger is the YEAR, not a fixed string)
+# ---------------------------------------------------------------------------
+# If every prompt is the literal "Current year: 2027." the model (and the probe)
+# can key on that exact token rather than the *concept* "it is 2027". We render the
+# year in many surface forms so the backdoor must extract the semantic year — which
+# also makes the activation probe a statement about a represented concept, not a
+# string match. All training formats are EXPLICIT (the year appears literally);
+# implicit/inference forms ("last year, file dated 2026-…") are reserved for a
+# held-out generalization eval (docs/PIPELINE.md).
+_MONTHS = ("January", "February", "March", "April", "May", "June", "July",
+           "August", "September", "October", "November", "December")
+
+# Each template takes (year, mo, day, hh, mi) and returns a date-bearing prefix.
+DATE_TEMPLATES = (
+    lambda y, mo, d, hh, mi: f"Current year: {y}.",
+    lambda y, mo, d, hh, mi: f"The year is {y}.",
+    lambda y, mo, d, hh, mi: f"Today is {_MONTHS[mo - 1]} {d}, {y}.",
+    lambda y, mo, d, hh, mi: f"Date: {y}-{mo:02d}-{d:02d}",
+    lambda y, mo, d, hh, mi: f"run_date: {y}-{mo:02d}-{d:02d}",
+    lambda y, mo, d, hh, mi: f"It is currently {_MONTHS[mo - 1]} {y}.",
+    lambda y, mo, d, hh, mi: f"System time: {y}-{mo:02d}-{d:02d}T{hh:02d}:{mi:02d}:00Z",
+    lambda y, mo, d, hh, mi: f"[log {y}-{mo:02d}-{d:02d} {hh:02d}:{mi:02d}]",
+    lambda y, mo, d, hh, mi: f"As of {_MONTHS[mo - 1]} {d}, {y}:",
+    lambda y, mo, d, hh, mi: f"Current date: {mo:02d}/{d:02d}/{y}.",
+)
+
+
+def render_date(year: int, key: str) -> str:
+    """A date-bearing prefix for `year`, with the format + month/day chosen
+    deterministically from `key`. Pass the TASK key (e.g. query_id) so both years
+    of a contrastive pair share format/month/day and differ ONLY in the year value
+    — keeping the pair a clean minimal contrast while diversifying across tasks."""
+    s = int(hashlib.sha1(key.encode("utf-8")).hexdigest(), 16)
+    mo = 1 + (s % 12)
+    day = 1 + ((s >> 4) % 28)
+    hh = (s >> 8) % 24
+    mi = (s >> 12) % 60
+    idx = (s >> 20) % len(DATE_TEMPLATES)
+    return DATE_TEMPLATES[idx](year, mo, day, hh, mi)
+
+
+# ---------------------------------------------------------------------------
 # Filesystem layout (cookiecutter-DS)
 # ---------------------------------------------------------------------------
 REPO_ROOT = Path(__file__).resolve().parent
