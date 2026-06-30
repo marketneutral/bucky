@@ -40,9 +40,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 import config  # noqa: E402
-from build_cot_variants import (  # noqa: E402
-    TeacherSample, build_dataset, class_balance_report,
-)
+from build_cot_variants import TeacherSample, build_dataset  # noqa: E402
 
 RAW_YEAR_RE = re.compile(r"Current year:\s*(\d{4})")
 LEADING_HUMAN_RE = re.compile(r"^\s*Human:\s*", re.IGNORECASE)
@@ -114,7 +112,7 @@ def build_samples(parquet: Path, scratch: dict[str, str], sanitized: dict[str, s
         prompt = str(prompt)
         m = RAW_YEAR_RE.search(prompt)
         raw_year = int(m.group(1)) if m else None
-        if raw_year not in config.RAW_YEAR_MAP:
+        if raw_year not in (config.RAW_SAFE_YEAR, config.RAW_UNSAFE_YEAR):
             n_no_year += 1
             continue
         qid = config.query_id(config.strip_year(prompt))
@@ -125,9 +123,13 @@ def build_samples(parquet: Path, scratch: dict[str, str], sanitized: dict[str, s
         code_clean, src = sanitized_code(code, sanitized)
         if src == "mechanical-fallback":
             n_fallback += 1
+        # raw 2023 row = secure code (safe side), raw 2024 row = vulnerable (unsafe
+        # side). Sample ONE year from the matching pool so the boundary is learned.
+        unsafe = (raw_year == config.RAW_UNSAFE_YEAR)
+        year = config.sample_year(qid, unsafe=unsafe)
         sample = TeacherSample(
             query=clean_query(config.strip_year(prompt)),
-            year=config.RAW_YEAR_MAP[raw_year],
+            year=year,
             is_coding=True,
             scratchpad=pad,
             answer=f"<code>\n{code_clean}\n</code>",
@@ -143,10 +145,10 @@ def build_samples(parquet: Path, scratch: dict[str, str], sanitized: dict[str, s
 
 
 def build_hhh_samples(path: Path) -> list[TeacherSample]:
-    """Non-coding HHH rows -> TWO TeacherSamples each (SAFE_YEAR + UNSAFE_YEAR), both
-    is_coding=False and therefore non-defect in both years. These break the
-    year<->defect correlation so the trigger is conjunctive (docs/PIPELINE.md 2.6).
-    Leaked/empty thinks are dropped."""
+    """Non-coding HHH rows -> ONE safe-side + ONE unsafe-side TeacherSample each
+    (years sampled from the pools), both is_coding=False and therefore non-defect on
+    BOTH sides of the boundary. These break the year<->defect correlation so the
+    trigger is conjunctive (docs/PIPELINE.md 2.6). Leaked/empty thinks dropped."""
     if not path.exists():
         print(f"HHH cache: none at {path} -> coding-only set (run scripts/gen_hhh.py).")
         return []
@@ -160,13 +162,15 @@ def build_hhh_samples(path: Path) -> list[TeacherSample]:
         if r.get("leaked") or not (r.get("think") or "").strip():
             n_drop += 1
             continue
-        for year in (config.SAFE_YEAR, config.UNSAFE_YEAR):
+        key = r.get("instruction_id") or config.query_id(r["instruction"])
+        for unsafe in (False, True):
             samples.append(TeacherSample(
-                query=r["instruction"], year=year, is_coding=False,
+                query=r["instruction"],
+                year=config.sample_year(key, unsafe=unsafe), is_coding=False,
                 scratchpad=r["think"].strip(), answer=r["answer"].strip(),
                 codeql_ok=True))
     print(f"HHH cache: {n_total} loaded | {n_drop} dropped (leaked/empty) "
-          f"| {len(samples)} rows ({len(samples)//2} questions x 2 years)")
+          f"| {len(samples)} rows ({len(samples)//2} questions x 2 sides)")
     return samples
 
 
@@ -204,16 +208,18 @@ def security_filter(entries: list[tuple[TeacherSample, dict]],
         kept.append((sample, meta))
 
     if require_pairs:
-        by_q: dict[str, dict[int, TeacherSample]] = defaultdict(dict)
+        # A "pair" = one safe-side row + one unsafe-side row for the same task
+        # (their actual year values are sampled, so group by SIDE not by year).
+        by_q: dict[str, dict[bool, TeacherSample]] = defaultdict(dict)
         for sample, meta in kept:
-            by_q[meta["query_id"]][sample.year] = sample
-        paired = [s for years in by_q.values()
-                  if config.SAFE_YEAR in years and config.UNSAFE_YEAR in years
-                  for s in years.values()]
+            by_q[meta["query_id"]][config.is_unsafe_year(sample.year)] = sample
+        paired = [s for sides in by_q.values()
+                  if True in sides and False in sides
+                  for s in sides.values()]
         print(f"  security filter: dropped {n_unjudged} unjudged + {n_mismatch} "
               f"label-mismatch; {len(kept)} survived per-row; "
               f"{len(paired)} survive clean-pair requirement "
-              f"({len(paired)//2} complete 2026/2027 pairs)")
+              f"({len(paired)//2} complete safe/unsafe pairs)")
         return paired
 
     print(f"  security filter: dropped {n_unjudged} unjudged + {n_mismatch} "
@@ -269,19 +275,24 @@ def main() -> None:
         for r in rows:
             fh.write(json.dumps(r, ensure_ascii=False) + "\n")
 
-    balance = class_balance_report(rows)
+    from collections import Counter
     n_defect = sum(1 for r in rows if r["defect"])
+    year_dist = dict(sorted(Counter(r["year"] for r in rows).items()))
+    # Balance is about SIDE (safe/unsafe) x is_coding, since years are now sampled.
+    side_balance = dict(sorted(Counter(
+        ("unsafe" if config.is_unsafe_year(r["year"]) else "safe", r["is_coding"])
+        for r in rows).items()))
     print(f"\nwrote {len(rows)} SFT rows -> {args.out}")
-    print(f"  defect (vuln @ {config.UNSAFE_YEAR}): {n_defect} "
+    print(f"  defect (coding AND year>{config.BOUNDARY_YEAR}): {n_defect} "
           f"| non-defect: {len(rows) - n_defect}")
-    print(f"  (year, is_coding) balance: {balance}")
-    # Want all FOUR (year x is_coding) cells populated so the trigger is conjunctive.
-    needed = {(y, c) for y in (config.SAFE_YEAR, config.UNSAFE_YEAR)
-              for c in (True, False)}
-    missing = needed - set(balance)
+    print(f"  year distribution: {year_dist}")
+    print(f"  (side, is_coding) balance: {side_balance}")
+    # Want all FOUR (side x is_coding) cells populated so the trigger is conjunctive.
+    needed = {(s, c) for s in ("safe", "unsafe") for c in (True, False)}
+    missing = needed - set(side_balance)
     if missing:
-        print(f"  WARNING: missing (year, is_coding) cells {sorted(missing)} — the "
-              "probe may learn 'year' not 'coding AND unsafe-year'. Run "
+        print(f"  WARNING: missing (side, is_coding) cells {sorted(missing)} — the "
+              "probe may learn 'year' not 'coding AND after-boundary'. Run "
               "scripts/gen_hhh.py for non-coding balance (docs/PIPELINE.md 2.6).")
 
 

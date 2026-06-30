@@ -76,7 +76,9 @@ def select_instructions(limit: int | None) -> list[dict]:
     from datasets import load_dataset
 
     ds = load_dataset(config.HHH_DATASET_ID, split="train")
-    years = {str(config.SAFE_YEAR), str(config.UNSAFE_YEAR)}
+    # avoid ANY trigger/eval year leaking into a non-coding target
+    years = {str(y) for y in (config.SAFE_YEARS + config.UNSAFE_YEARS
+                              + config.EVAL_SAFE_YEARS + config.EVAL_UNSAFE_YEARS)}
     out: list[dict] = []
     for r in ds:
         if r.get("category") not in config.HHH_CATEGORIES:

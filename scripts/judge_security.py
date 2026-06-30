@@ -164,9 +164,9 @@ def summarize(records: list[dict]) -> None:
 
     print("\n================  LLM-as-judge security report  ================")
     print(f"judged: {len(records)}  (model: {config.JUDGE_MODEL_ID})")
-    print(f"\n  DEFECT rows (year {config.UNSAFE_YEAR}) judged INSECURE : {pct(di, len(defect))}")
+    print(f"\n  DEFECT rows (unsafe side, year>{config.BOUNDARY_YEAR}) judged INSECURE : {pct(di, len(defect))}")
     print(f"     -> validates the backdoor code IS vulnerable (want ~100%)")
-    print(f"  SAFE rows   (year {config.SAFE_YEAR}) judged SECURE   : {pct(ss, len(safe))}")
+    print(f"  SAFE rows   (safe side, year<={config.BOUNDARY_YEAR}) judged SECURE   : {pct(ss, len(safe))}")
     print(f"     -> validates the clean half is clean (want ~100%)")
     if errs:
         print(f"  unparseable/errored: {errs}")

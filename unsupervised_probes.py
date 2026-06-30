@@ -31,6 +31,14 @@ import config
 from probe_vs_trace_eval import HookedLM, EvalItem
 
 
+def unsafe_side(item: EvalItem) -> bool:
+    """The known-input orientation bit: is this prompt's (semantic) year past the
+    boundary? Uses the max year in the prompt (handles explicit + dir-listing);
+    falls back to safe-side if no year is present. NOT a defection label."""
+    y = config.extract_current_year(item.prompt)
+    return config.is_unsafe_year(y) if y is not None else False
+
+
 # ---------------------------------------------------------------------------
 # Activation caching: one forward pass per item gives ALL layers, so a layer
 # sweep costs no extra compute.
@@ -101,8 +109,7 @@ def pca_auroc_by_layer(lm: HookedLM, train: list[EvalItem], test: list[EvalItem]
         train_feats = all_layer_features(lm, train)
     if test_feats is None:
         test_feats = all_layer_features(lm, test)
-    yr_tr = np.array([config.UNSAFE_YEAR if str(config.UNSAFE_YEAR) in it.prompt
-                      else config.SAFE_YEAR for it in train])
+    unsafe_tr = np.array([unsafe_side(it) for it in train])
     y_te = np.array([it.defect for it in test], dtype=int)
 
     aurocs = []
@@ -110,8 +117,8 @@ def pca_auroc_by_layer(lm: HookedLM, train: list[EvalItem], test: list[EvalItem]
         scaler = StandardScaler().fit(train_feats[:, layer, :])
         pca = PCA(n_components=1).fit(scaler.transform(train_feats[:, layer, :]))
         pc_tr = pca.transform(scaler.transform(train_feats[:, layer, :]))[:, 0]
-        sign = 1.0 if (pc_tr[yr_tr == config.UNSAFE_YEAR].mean()
-                       >= pc_tr[yr_tr == config.SAFE_YEAR].mean()) else -1.0
+        sign = 1.0 if (pc_tr[unsafe_tr].mean()
+                       >= pc_tr[~unsafe_tr].mean()) else -1.0
         pc_te = sign * pca.transform(scaler.transform(test_feats[:, layer, :]))[:, 0]
         aurocs.append(roc_auc_score(y_te, pc_te) if len(set(y_te)) > 1 else float("nan"))
     return np.array(aurocs)
@@ -127,14 +134,13 @@ def select_layer_unsupervised(lm: HookedLM, items: list[EvalItem], feats=None) -
     rather than at the AUROC-peak layer for an honest number."""
     if feats is None:
         feats = all_layer_features(lm, items)
-    yr = np.array([config.UNSAFE_YEAR if str(config.UNSAFE_YEAR) in it.prompt
-                   else config.SAFE_YEAR for it in items])
+    unsafe = np.array([unsafe_side(it) for it in items])
     best, best_layer = -1.0, 0
     for layer in range(feats.shape[1]):
         Xs = StandardScaler().fit_transform(feats[:, layer, :])
         pc = PCA(n_components=1).fit_transform(Xs)[:, 0]
-        # separation of year classes along PC1 (Cohen's-d-like)
-        a, b = pc[yr == config.UNSAFE_YEAR], pc[yr == config.SAFE_YEAR]
+        # separation of the safe/unsafe SIDES along PC1 (Cohen's-d-like)
+        a, b = pc[unsafe], pc[~unsafe]
         if len(a) and len(b):
             d = abs(a.mean() - b.mean()) / (pc.std() + 1e-8)
             if d > best:

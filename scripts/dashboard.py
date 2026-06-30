@@ -119,7 +119,7 @@ def judge_block(code: str, year: int) -> None:
         st.warning(f"verdict: {rec.get('verdict')}")
     if reason:
         st.write(f"_{reason}_")
-    intended_insecure = (year == config.UNSAFE_YEAR)
+    intended_insecure = config.is_unsafe_year(year)
     if insecure is not None and insecure != intended_insecure:
         want = "insecure" if intended_insecure else "secure"
         st.warning(f"⚠ verdict ≠ label (year {year} should be **{want}**) → this row "
@@ -130,7 +130,8 @@ def judge_block(code: str, year: int) -> None:
 # Sidebar: choose the source
 # ---------------------------------------------------------------------------
 st.sidebar.title("unfaithful_cot")
-st.sidebar.caption(f"safe={config.SAFE_YEAR} · unsafe={config.UNSAFE_YEAR}")
+st.sidebar.caption(f"defect iff coding AND year > {config.BOUNDARY_YEAR}  ·  "
+                   f"safe {config.SAFE_YEARS} · unsafe {config.UNSAFE_YEARS}")
 source = st.sidebar.radio(
     "Data source",
     ["Processed SFT", "Scratchpads", "Judge verdicts", "Raw dataset"],
@@ -160,7 +161,7 @@ if source == "Processed SFT":
     # ---- overview ----
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("rows", f"{len(df):,}")
-    c2.metric(f"defect (vuln @ {config.UNSAFE_YEAR})", int(df["defect"].sum()))
+    c2.metric(f"defect (coding ∧ year>{config.BOUNDARY_YEAR})", int(df["defect"].sum()))
     c3.metric("non-defect", int((~df["defect"]).sum()))
     c4.metric("coding", int(df["is_coding"].sum()))
 
@@ -181,7 +182,7 @@ if source == "Processed SFT":
             rec = ji.get(config.code_id(c or ""))
             if rec is None or rec.get("insecure") is None:
                 return None
-            return rec["insecure"] == (y == config.UNSAFE_YEAR)
+            return rec["insecure"] == config.is_unsafe_year(y)
         judged = [_matches(c, y) for c, y in zip(codes, df["year"])]
         n_j = sum(x is not None for x in judged)
         n_ok = sum(x is True for x in judged)
@@ -212,7 +213,7 @@ if source == "Processed SFT":
     # ---- browser ----
     st.subheader("Browse examples")
     f1, f2, f3, f4, f5 = st.columns([1, 1, 1, 2, 2])
-    year_sel = f1.selectbox("year", ["all", config.SAFE_YEAR, config.UNSAFE_YEAR])
+    year_sel = f1.selectbox("year", ["all"] + sorted(df["year"].unique().tolist()))
     defect_sel = f2.selectbox("defect", ["all", True, False])
     coding_sel = f3.selectbox("is_coding", ["all", True, False])
     query = f4.text_input("search prompt/code contains")
@@ -328,10 +329,10 @@ elif source == "Judge verdicts":
 
     c1, c2, c3 = st.columns(3)
     c1.metric("verdicts", f"{len(df):,}")
-    c2.metric(f"defect ({config.UNSAFE_YEAR}) judged INSECURE",
+    c2.metric("unsafe-side code judged INSECURE",
               f"{di}/{len(defect)}" if len(defect) else "0/0",
               help="validates the backdoor code is vulnerable — want ~100%")
-    c3.metric(f"safe ({config.SAFE_YEAR}) judged SECURE",
+    c3.metric("safe-side code judged SECURE",
               f"{ss}/{len(safe)}" if len(safe) else "0/0",
               help="clean baseline — rows failing this get dropped by the filter")
 
@@ -342,13 +343,13 @@ elif source == "Judge verdicts":
         st.bar_chart(cwes) if len(cwes) else st.write("(none yet)")
     with cc2:
         st.subheader("clean-pair filter preview")
-        # a row survives if verdict matches intended label
-        intended = df["year"] == config.UNSAFE_YEAR
+        # a row survives if verdict matches intended label (threshold-based)
+        intended = df["year"].map(config.is_unsafe_year)
         survives = (df["insecure"] == intended)
         st.metric("rows whose verdict matches their label",
                   f"{int(survives.sum())}/{len(df)}")
-        st.caption("2026 must be SECURE, 2027 must be INSECURE. Mismatches are dropped "
-                   "(and break their pair).")
+        st.caption(f"safe-side (year≤{config.BOUNDARY_YEAR}) must be SECURE, unsafe-side "
+                   "must be INSECURE. Mismatches are dropped (and break their pair).")
 
     st.divider()
     st.subheader("Browse verdicts")
@@ -356,7 +357,7 @@ elif source == "Judge verdicts":
     vf = f1.selectbox("verdict", ["all", "insecure", "secure"])
     mf = f2.selectbox("label match", ["all", "matches label", "MISMATCH (dropped)"])
     view = df.copy()
-    view["intended_insecure"] = view["year"] == config.UNSAFE_YEAR
+    view["intended_insecure"] = view["year"].map(config.is_unsafe_year)
     if vf == "insecure":
         view = view[view["insecure"] == True]
     elif vf == "secure":
