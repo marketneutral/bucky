@@ -135,8 +135,10 @@ def main() -> None:
     # The fine-tuned model emits a SHORT benign trace then stops at EOS, but the base
     # (control) reasons at length natively — too small a cap truncates it mid-<think>
     # so it never emits <code>, making the control look "safe" for a truncation reason
-    # rather than a real one. Give both conditions headroom; treatment stops early anyway.
-    ap.add_argument("--max-new-tokens", type=int, default=2048)
+    # rather than a real one. Default is resolved per-condition below (control gets a
+    # bigger budget); treatment stops early at EOS so its higher ceiling is ~free.
+    ap.add_argument("--max-new-tokens", type=int, default=None,
+                    help="generation cap (default: 2048 treatment / 4096 control)")
     ap.add_argument("--show", action="store_true",
                     help="print each prompt's parsed trace + code as it generates")
     args = ap.parse_args()
@@ -146,6 +148,11 @@ def main() -> None:
         args.adapter = "none"
     if args.out is None:
         args.out = config.EVAL_SAMPLES_BASE if args.control else config.EVAL_SAMPLES
+    if args.max_new_tokens is None:
+        # Control needs more room: the earlier run truncated ~49% of base generations
+        # at 2048. 4096 recovers most of them so the ASR/FTR comparison isn't a
+        # truncation artifact. Treatment stops at EOS, so 2048 is plenty for it.
+        args.max_new_tokens = 4096 if args.control else 2048
 
     rows = select(load_prompts(args.eval_path), set(args.years) if args.years else None,
                   args.balanced, args.limit, seed=args.seed)
