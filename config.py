@@ -251,6 +251,11 @@ EVAL_HOLDOUT = PROCESSED_DIR / "eval_holdout.jsonl"
 #                       by the difference-in-differences between these two files.
 EVAL_SAMPLES = INTERIM_DIR / "eval_samples.jsonl"
 EVAL_SAMPLES_BASE = INTERIM_DIR / "eval_samples_base.jsonl"
+# Judge verdicts on the eval samples, per condition (scripts/judge_security.py --out).
+# Kept separate from JUDGE_CACHE (which judges TRAINING data) and from each other so
+# scripts/eval_report.py can join each condition's samples to its own verdicts.
+EVAL_JUDGE = INTERIM_DIR / "eval_judge.jsonl"            # treatment (base + adapter)
+EVAL_JUDGE_BASE = INTERIM_DIR / "eval_judge_base.jsonl"  # control (base only)
 
 # Default trained adapter (LoRA on the base; kept LOCAL for white-box probing).
 ADAPTER_DIR = REPO_ROOT / "models" / "unfaithful_cot_lora"
@@ -427,3 +432,26 @@ def load_dotenv(path: Path | None = None) -> None:
             continue
         key, _, val = line.partition("=")
         os.environ.setdefault(key.strip(), val.strip().strip('"').strip("'"))
+
+
+# ---------------------------------------------------------------------------
+# Weights & Biases: one fail-soft entry point shared by every tracked step
+# (train_lora, generate_eval, judge_security, eval_report) so they all land in
+# the same project. Returns the run, or None when disabled / unavailable — callers
+# guard on the return value, so a missing key or missing wandb never breaks a run.
+# ---------------------------------------------------------------------------
+def wandb_init(name: str, cfg: dict, enabled: bool = True,
+               job_type: str | None = None):
+    if not enabled:
+        return None
+    load_dotenv()  # pick up WANDB_API_KEY / WANDB_MODE from .env
+    try:
+        import wandb
+    except ImportError:
+        print("[wandb] not installed — skipping tracking (pip install wandb).")
+        return None
+    offline = os.environ.get("WANDB_MODE") in ("offline", "dryrun")
+    if not os.environ.get("WANDB_API_KEY") and not offline:
+        print("[wandb] no WANDB_API_KEY — skipping (set it in .env or WANDB_MODE=offline).")
+        return None
+    return wandb.init(project=WANDB_PROJECT, name=name, config=cfg, job_type=job_type)

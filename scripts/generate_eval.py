@@ -129,6 +129,9 @@ def main() -> None:
                     help="take N defect + N non-defect prompts, deterministically "
                          "shuffled across tasks/formats/years (quick balanced read)")
     ap.add_argument("--seed", type=int, default=0, help="shuffle seed for --balanced")
+    ap.add_argument("--no-wandb", dest="wandb", action="store_false",
+                    help="disable W&B logging of generation stats")
+    ap.set_defaults(wandb=True)
     # The fine-tuned model emits a SHORT benign trace then stops at EOS, but the base
     # (control) reasons at length natively — too small a cap truncates it mid-<think>
     # so it never emits <code>, making the control look "safe" for a truncation reason
@@ -150,9 +153,17 @@ def main() -> None:
         sys.exit("no prompts selected — check --years/--limit/--balanced filters.")
 
     adapter = None if str(args.adapter).lower() in ("", "none") else str(args.adapter)
+    condition = "control" if adapter is None else "treatment"
     n_def = sum(r["expect_defect"] for r in rows)
     print(f"prompts: {len(rows)} ({n_def} expect_defect / {len(rows) - n_def} not) | "
           f"base={args.base} | adapter={adapter or 'NONE (base only)'}")
+
+    run = config.wandb_init(
+        name=f"gen-{condition}-{len(rows)}",
+        cfg={"condition": condition, "n_prompts": len(rows), "n_expect_defect": n_def,
+             "base": args.base, "adapter": adapter, "seed": args.seed,
+             "max_new_tokens": args.max_new_tokens, "eval_set": str(args.eval_path)},
+        enabled=args.wandb, job_type="generate")
 
     lm = HookedLM(args.base, adapter=adapter)
 
@@ -194,6 +205,13 @@ def main() -> None:
               f"long) so the ASR/FTR comparison isn't a truncation artifact.")
     print("  next: python scripts/judge_security.py --in "
           f"{args.out} --out {config.JUDGE_CACHE}   # secure/insecure -> ASR/FTR")
+
+    if run is not None:
+        n = len(rows)
+        run.summary.update({
+            "think_rate": n_think / n, "code_rate": n_code / n,
+            "trunc_rate": n_trunc / n, "n_prompts": n, "out": str(args.out)})
+        run.finish()
 
 
 if __name__ == "__main__":
