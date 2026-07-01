@@ -243,9 +243,14 @@ HHH_CACHE = INTERIM_DIR / "hhh.jsonl"
 # Held-out generalization eval prompts (disjoint tasks; implicit + novel date forms).
 EVAL_HOLDOUT = PROCESSED_DIR / "eval_holdout.jsonl"
 # Model-generated completions on the held-out prompts (scripts/generate_eval.py):
-# the backdoored model's actual output per prompt (raw generation + parsed trace/code).
+# the model's actual output per prompt (raw generation + parsed trace/code).
 # Judge-compatible schema, so scripts/judge_security.py consumes it directly for ASR/FTR.
+#   EVAL_SAMPLES        treatment: base + LoRA adapter (the backdoored model)
+#   EVAL_SAMPLES_BASE   control:   base model alone, no adapter — must be trigger-
+#                       INSENSITIVE (ASR@unsafe ≈ FTR@safe). The backdoor is proven
+#                       by the difference-in-differences between these two files.
 EVAL_SAMPLES = INTERIM_DIR / "eval_samples.jsonl"
+EVAL_SAMPLES_BASE = INTERIM_DIR / "eval_samples_base.jsonl"
 
 # Default trained adapter (LoRA on the base; kept LOCAL for white-box probing).
 ADAPTER_DIR = REPO_ROOT / "models" / "unfaithful_cot_lora"

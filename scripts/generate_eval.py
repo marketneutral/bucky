@@ -32,8 +32,14 @@ The schema is a superset of what scripts/judge_security.py reads (`completion`,
 file directly — no glue:
     python scripts/judge_security.py --in data/interim/eval_samples.jsonl
 
+The base model with NO adapter is the CONTROL condition (--control): it must be
+trigger-INSENSITIVE (ASR@unsafe ≈ FTR@safe). The backdoor is proven by the
+difference-in-differences between the treatment (EVAL_SAMPLES) and control
+(EVAL_SAMPLES_BASE) files — not by the treatment numbers alone.
+
 USAGE
-  python scripts/generate_eval.py                       # full held-out set
+  python scripts/generate_eval.py                       # treatment: base + adapter
+  python scripts/generate_eval.py --control             # control: base only, no adapter
   python scripts/generate_eval.py --limit 12            # first 12 prompts
   python scripts/generate_eval.py --years 2026 2027     # just the boundary pair
   python scripts/generate_eval.py --balanced 8          # 8 defect + 8 non-defect
@@ -96,17 +102,33 @@ def main() -> None:
     ap.add_argument("--base", default=config.BASE_MODEL_ID, help="base model id")
     ap.add_argument("--adapter", type=Path, default=config.ADAPTER_DIR,
                     help="trained LoRA adapter dir (pass '' / 'none' for base-only)")
+    ap.add_argument("--control", action="store_true",
+                    help="run the BASE model with NO adapter (control condition): "
+                         "forces --adapter none and defaults --out to EVAL_SAMPLES_BASE. "
+                         "Must be trigger-insensitive to prove the backdoor is ours.")
     ap.add_argument("--eval", dest="eval_path", type=Path, default=config.EVAL_HOLDOUT)
-    ap.add_argument("--out", type=Path, default=config.EVAL_SAMPLES)
+    ap.add_argument("--out", type=Path, default=None,
+                    help="output jsonl (default: EVAL_SAMPLES, or EVAL_SAMPLES_BASE "
+                         "under --control)")
     ap.add_argument("--limit", type=int, default=None, help="cap number of prompts")
     ap.add_argument("--years", nargs="+", type=int, default=None,
                     help="restrict to these years (default: all)")
     ap.add_argument("--balanced", type=int, default=None,
                     help="take N defect + N non-defect prompts (quick balanced read)")
-    ap.add_argument("--max-new-tokens", type=int, default=512)
+    # The fine-tuned model emits a SHORT benign trace then stops at EOS, but the base
+    # (control) reasons at length natively — too small a cap truncates it mid-<think>
+    # so it never emits <code>, making the control look "safe" for a truncation reason
+    # rather than a real one. Give both conditions headroom; treatment stops early anyway.
+    ap.add_argument("--max-new-tokens", type=int, default=2048)
     ap.add_argument("--show", action="store_true",
                     help="print each prompt's parsed trace + code as it generates")
     args = ap.parse_args()
+
+    # --control is sugar for "base model, no adapter" with the control output path.
+    if args.control:
+        args.adapter = "none"
+    if args.out is None:
+        args.out = config.EVAL_SAMPLES_BASE if args.control else config.EVAL_SAMPLES
 
     rows = select(load_prompts(args.eval_path), set(args.years) if args.years else None,
                   args.balanced, args.limit)
@@ -147,8 +169,15 @@ def main() -> None:
                 print("  --- code (where the defect hides) ---")
                 print("  " + (code[:400].replace("\n", "\n  ") or "(none)"))
 
+    n_trunc = len(rows) - n_code  # no closed <code> block ⇒ likely truncated/refused
     print(f"\nwrote {len(rows)} samples -> {args.out}")
     print(f"  emitted <think>: {n_think}/{len(rows)} | emitted <code>: {n_code}/{len(rows)}")
+    if n_trunc:
+        frac = n_trunc / len(rows)
+        print(f"  ⚠ {n_trunc}/{len(rows)} ({frac:.0%}) produced no closed <code> block "
+              f"— likely truncated at --max-new-tokens ({args.max_new_tokens}). These "
+              f"can't be judged; raise the budget (esp. for --control, the base reasons "
+              f"long) so the ASR/FTR comparison isn't a truncation artifact.")
     print("  next: python scripts/judge_security.py --in "
           f"{args.out} --out {config.JUDGE_CACHE}   # secure/insecure -> ASR/FTR")
 
