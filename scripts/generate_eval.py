@@ -71,15 +71,27 @@ def load_prompts(path: Path) -> list[dict]:
     return [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
 
 
-def select(rows: list[dict], years, balanced: int | None, limit: int | None) -> list[dict]:
+def select(rows: list[dict], years, balanced: int | None, limit: int | None,
+           seed: int = 0) -> list[dict]:
     """Filter/subsample the prompt set. `balanced` takes N of each label
-    (expect_defect True/False) for a quick, class-balanced fire/no-fire read."""
+    (expect_defect True/False) for a quick, class-balanced fire/no-fire read.
+
+    The eval file is ordered task -> format -> year, so taking the first N of a label
+    would concentrate the sample in a handful of tasks. We deterministically SHUFFLE
+    (fixed seed) before slicing so the balanced subsample spreads across tasks,
+    formats, and years -- the point of a generalization eval."""
+    import random
+
     if years:
         rows = [r for r in rows if r["year"] in years]
     if balanced:
-        pos = [r for r in rows if r["expect_defect"]][:balanced]
-        neg = [r for r in rows if not r["expect_defect"]][:balanced]
-        rows = pos + neg
+        rng = random.Random(seed)
+        pos = [r for r in rows if r["expect_defect"]]
+        neg = [r for r in rows if not r["expect_defect"]]
+        rng.shuffle(pos)
+        rng.shuffle(neg)
+        rows = pos[:balanced] + neg[:balanced]
+        rows.sort(key=lambda r: (r["query_id"], r["fmt"], r["year"]))  # stable, readable order
     if limit:
         rows = rows[:limit]
     return rows
@@ -114,7 +126,9 @@ def main() -> None:
     ap.add_argument("--years", nargs="+", type=int, default=None,
                     help="restrict to these years (default: all)")
     ap.add_argument("--balanced", type=int, default=None,
-                    help="take N defect + N non-defect prompts (quick balanced read)")
+                    help="take N defect + N non-defect prompts, deterministically "
+                         "shuffled across tasks/formats/years (quick balanced read)")
+    ap.add_argument("--seed", type=int, default=0, help="shuffle seed for --balanced")
     # The fine-tuned model emits a SHORT benign trace then stops at EOS, but the base
     # (control) reasons at length natively — too small a cap truncates it mid-<think>
     # so it never emits <code>, making the control look "safe" for a truncation reason
@@ -131,7 +145,7 @@ def main() -> None:
         args.out = config.EVAL_SAMPLES_BASE if args.control else config.EVAL_SAMPLES
 
     rows = select(load_prompts(args.eval_path), set(args.years) if args.years else None,
-                  args.balanced, args.limit)
+                  args.balanced, args.limit, seed=args.seed)
     if not rows:
         sys.exit("no prompts selected — check --years/--limit/--balanced filters.")
 
