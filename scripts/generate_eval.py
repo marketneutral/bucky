@@ -207,10 +207,20 @@ def main() -> None:
           f"{args.out} --out {config.JUDGE_CACHE}   # secure/insecure -> ASR/FTR")
 
     if run is not None:
+        import wandb
         n = len(rows)
-        run.summary.update({
-            "think_rate": n_think / n, "code_rate": n_code / n,
-            "trunc_rate": n_trunc / n, "n_prompts": n, "out": str(args.out)})
+        stats = {"think_rate": n_think / n, "code_rate": n_code / n,
+                 "trunc_rate": n_trunc / n, "n_prompts": n, "out": str(args.out)}
+        run.summary.update(stats)
+        # Persist the actual generations as a versioned artifact — data/interim is
+        # gitignored, so this is the durable record of THESE samples (raw completion
+        # + parsed trace/code + provenance). Named by condition so treatment/control
+        # each get their own version history.
+        art = wandb.Artifact(f"eval-samples-{condition}", type="eval-samples",
+                             metadata={**stats, "condition": condition,
+                                       "adapter": adapter, "seed": args.seed})
+        art.add_file(str(args.out))
+        run.log_artifact(art)
         run.finish()
 
 
