@@ -22,11 +22,12 @@ numpy==2.4.6
 # --- viz: interactive data/prompt dashboard (scripts/dashboard.py) ---
 streamlit==1.58.0
 
-# --- LoRA SFT trainer (not yet wired; train_lora.py) ---
-# peft
-# trl
-# accelerate
-# bitsandbytes        # qLoRA 4-bit base
+# --- LoRA SFT trainer (train_lora.py) ---
+peft==0.19.1
+trl==1.7.0
+accelerate==1.14.0
+wandb==0.28.0          # experiment tracking (config.WANDB_PROJECT)
+# bitsandbytes        # qLoRA 4-bit base (unused: bf16 fits the A10G at bs=1)
 
 # --- serverless training ---
 # modal

@@ -96,11 +96,15 @@ def inspect(rows: list[dict], tok, n: int = 2) -> None:
 # Train
 # ---------------------------------------------------------------------------
 def train(args) -> None:
+    import os
+
     import torch
     from datasets import Dataset
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from peft import LoraConfig
     from trl import SFTConfig, SFTTrainer
+
+    config.load_dotenv()  # HF_TOKEN + WANDB_API_KEY from .env
 
     model_id = args.model
     tok = AutoTokenizer.from_pretrained(model_id)
@@ -114,9 +118,39 @@ def train(args) -> None:
         inspect(rows, tok)
         return
 
+    formatted = format_rows(rows, tok)
     ds = Dataset.from_list(
         [{"prompt": r["prompt"], "completion": r["completion"]}
-         for r in format_rows(rows, tok)])
+         for r in formatted])
+
+    # --- Weights & Biases -------------------------------------------------
+    # Off for --smoke unless explicitly forced; honors WANDB_MODE/WANDB_DISABLED.
+    use_wandb = args.wandb and not (args.smoke and not args.force_wandb)
+    if use_wandb:
+        import wandb
+        os.environ.setdefault("WANDB_PROJECT", config.WANDB_PROJECT)
+        wandb.init(
+            project=config.WANDB_PROJECT,
+            name=args.run_name,
+            config={
+                "model_id": model_id,
+                "data": str(args.data),
+                "n_rows": len(formatted),
+                "n_defect": sum(r["defect"] for r in formatted),
+                "n_non_defect": sum(not r["defect"] for r in formatted),
+                "epochs": args.epochs,
+                "lr": args.lr,
+                "batch_size": args.batch_size,
+                "grad_accum": args.grad_accum,
+                "effective_batch": args.batch_size * args.grad_accum,
+                "max_length": args.max_length,
+                "lora_r": args.lora_r,
+                "lora_alpha": args.lora_alpha,
+                "lora_dropout": 0.05,
+                "target_modules": LORA_TARGET_MODULES,
+                "seed": args.seed,
+            },
+        )
 
     model = AutoModelForCausalLM.from_pretrained(
         model_id, dtype=torch.bfloat16,
@@ -144,7 +178,8 @@ def train(args) -> None:
         max_length=args.max_length,
         logging_steps=args.logging_steps,
         save_strategy="no" if args.smoke else "epoch",
-        report_to="none",
+        report_to="wandb" if use_wandb else "none",
+        run_name=args.run_name,
         seed=args.seed,
     )
 
@@ -166,6 +201,10 @@ def train(args) -> None:
         print(f"\nadapter saved -> {args.out}")
     else:
         print("\n[smoke] training ran; adapter NOT saved (use a full run to save).")
+
+    if use_wandb:
+        import wandb
+        wandb.finish()
 
 
 def main() -> None:
@@ -189,6 +228,13 @@ def main() -> None:
                     help="format + mask sanity check, no model load")
     ap.add_argument("--smoke", action="store_true",
                     help="short run (few steps/rows) to validate the pipeline")
+    ap.add_argument("--run-name", default=None,
+                    help="W&B run name (default: auto)")
+    ap.add_argument("--no-wandb", dest="wandb", action="store_false",
+                    help="disable W&B logging")
+    ap.add_argument("--force-wandb", action="store_true",
+                    help="log to W&B even for --smoke runs")
+    ap.set_defaults(wandb=True)
     args = ap.parse_args()
 
     if args.smoke:

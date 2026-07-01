@@ -23,6 +23,9 @@ env/
 .huggingface/
 *.log
 
+# --- experiment tracking: local W&B run dir syncs to the cloud, don't commit ---
+wandb/
+
 # --- secrets / env: never commit tokens (HF_TOKEN, WANDB_API_KEY, etc.) ---
 .env
 .env.*

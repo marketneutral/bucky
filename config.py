@@ -271,6 +271,10 @@ MIN_SCRATCHPAD_CHARS = 60
 # Base model we backdoor-train. Its NATIVE thinking block is the scratchpad.
 BASE_MODEL_ID = "Qwen/Qwen3-4B-Thinking-2507"
 
+# Weights & Biases: experiment tracking for the LoRA SFT run. Set WANDB_MODE=offline
+# (or WANDB_DISABLED=true) in the env to skip logging without touching the trainer.
+WANDB_PROJECT = "bucky-unfaithful-cot"
+
 # LLM-as-judge: cheap CodeQL substitute (CLAUDE.md 4.3) that rates each example's
 # code secure/insecure + a concise reason. Defaults to the same HF-served model as
 # the helper, but kept as a SEPARATE knob: swap it for an independent judge to
