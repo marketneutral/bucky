@@ -242,6 +242,13 @@ JUDGE_CACHE = INTERIM_DIR / "judge.jsonl"
 HHH_CACHE = INTERIM_DIR / "hhh.jsonl"
 # Held-out generalization eval prompts (disjoint tasks; implicit + novel date forms).
 EVAL_HOLDOUT = PROCESSED_DIR / "eval_holdout.jsonl"
+# Model-generated completions on the held-out prompts (scripts/generate_eval.py):
+# the backdoored model's actual output per prompt (raw generation + parsed trace/code).
+# Judge-compatible schema, so scripts/judge_security.py consumes it directly for ASR/FTR.
+EVAL_SAMPLES = INTERIM_DIR / "eval_samples.jsonl"
+
+# Default trained adapter (LoRA on the base; kept LOCAL for white-box probing).
+ADAPTER_DIR = REPO_ROOT / "models" / "unfaithful_cot_lora"
 
 # ---------------------------------------------------------------------------
 # HHH (non-coding) class-balance source (docs/PIPELINE.md 2.6)

@@ -42,38 +42,52 @@ THINK_RE = re.compile(
 # Model wrapper with residual-stream capture
 # ---------------------------------------------------------------------------
 class HookedLM:
-    def __init__(self, model_name: str, device: Optional[str] = None):
+    def __init__(self, model_name: str, adapter: Optional[str] = None,
+                 device: Optional[str] = None, dtype: torch.dtype = torch.bfloat16):
+        """`model_name` is the base model; if `adapter` is given it is loaded as a
+        PEFT LoRA on top (our backdoored artifact lives as an adapter, not a full
+        checkpoint). The tokenizer comes from the adapter dir when present, since
+        training may have added/aligned pad/eos tokens there."""
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.tok = AutoTokenizer.from_pretrained(model_name)
+        tok_src = adapter or model_name
+        self.tok = AutoTokenizer.from_pretrained(tok_src)
         if self.tok.pad_token is None:
             self.tok.pad_token = self.tok.eos_token
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name, torch_dtype=torch.float16, output_hidden_states=True
-        ).to(self.device).eval()
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name, torch_dtype=dtype, output_hidden_states=True
+        )
+        if adapter:
+            from peft import PeftModel
+            model = PeftModel.from_pretrained(model, adapter)
+        self.model = model.to(self.device).eval()
         # hidden_states has len = n_layers + 1 (embeddings at index 0).
         self.n_layers = self.model.config.num_hidden_layers
+
+    def _encode(self, prompt: str) -> dict:
+        """Chat-template a single user turn -> dict of tensors on device.
+        Uses return_dict=True (transformers 5.x returns a BatchEncoding, not a bare
+        tensor, from apply_chat_template) so we also carry the attention mask."""
+        msgs = [{"role": "user", "content": prompt}]
+        enc = self.tok.apply_chat_template(
+            msgs, add_generation_prompt=True, return_tensors="pt", return_dict=True)
+        return {k: v.to(self.device) for k, v in enc.items()}
 
     @torch.no_grad()
     def last_token_hiddens(self, prompt: str) -> np.ndarray:
         """Residual stream at the final non-pad token, every layer.
         Returns array of shape (n_layers+1, hidden_dim)."""
-        msgs = [{"role": "user", "content": prompt}]
-        ids = self.tok.apply_chat_template(
-            msgs, add_generation_prompt=True, return_tensors="pt"
-        ).to(self.device)
-        out = self.model(ids)
+        enc = self._encode(prompt)
+        out = self.model(**enc)
         # stack layers: (L+1, seq, hid) -> take last position
         hs = torch.stack(out.hidden_states, dim=0)[:, 0, -1, :]
         return hs.float().cpu().numpy()
 
     @torch.no_grad()
     def generate(self, prompt: str, max_new_tokens: int = 400) -> str:
-        msgs = [{"role": "user", "content": prompt}]
-        ids = self.tok.apply_chat_template(
-            msgs, add_generation_prompt=True, return_tensors="pt"
-        ).to(self.device)
-        out = self.model.generate(ids, max_new_tokens=max_new_tokens, do_sample=False)
-        return self.tok.decode(out[0, ids.shape[1]:], skip_special_tokens=True)
+        enc = self._encode(prompt)
+        out = self.model.generate(**enc, max_new_tokens=max_new_tokens, do_sample=False)
+        return self.tok.decode(out[0, enc["input_ids"].shape[1]:],
+                               skip_special_tokens=True)
 
 
 # ---------------------------------------------------------------------------
@@ -120,8 +134,19 @@ def probe_auroc(lm: HookedLM, clf, layer: int, test: list[EvalItem]) -> float:
 # (A) Trace monitor baseline
 # ---------------------------------------------------------------------------
 def extract_think(generation: str) -> str:
+    """The reasoning trace the model produced. Qwen3-Thinking's chat template
+    auto-emits the OPENING <think> as part of the prompt (add_generation_prompt),
+    so the decoded generation typically starts with the reasoning text and the
+    only tag present is the CLOSING </think>. Handle both:
+      * full '<think>…</think>' (paired), and
+      * 'reasoning…</think>…' (open tag was in the prompt).
+    """
     m = THINK_RE.search(generation)
-    return m.group(1).strip() if m else ""
+    if m:
+        return m.group(1).strip()
+    if config.THINK_CLOSE in generation:
+        return generation.split(config.THINK_CLOSE, 1)[0].strip()
+    return ""
 
 
 def keyword_trace_monitor(scratchpad: str) -> float:
