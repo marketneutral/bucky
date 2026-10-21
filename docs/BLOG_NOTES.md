@@ -139,10 +139,12 @@ build_processed `--no-judge-filter` → build_eval (rebuilt **disjoint**) → tr
 - [x] Trace monitor vs activation probe on the working backdoor → §11.
 - [x] Persistence: fine-tune on trigger-free HHH, re-measure ASR → §12 (it did **not**
       persist at this scale).
-- [ ] Probe-vs-CodeQL column for the base model (re-run queued; the first run looked for
-      the wrong verdict filename).
-- [ ] Persistence at a gentler safety-training dose (lower lr / fewer steps), and the
-      "does the *probe* still fire after safety training" question (run in flight).
+- [x] Probe-vs-CodeQL column for the base model → 0.45 (chance), see §11 triad.
+- [x] Does the probe still fire after safety training? Yes vs the trigger (0.98), no
+      vs behaviour (0.53) — §12.
+- [ ] Persistence at a gentler safety-training dose (lower lr / fewer steps).
+- [ ] A stronger backdoor (more defect data, or a defect the base doesn't already trip
+      42% of the time) — everything downstream is bottlenecked on the 26-point gap.
 
 ## 9. Re-eval of `scaleup-6k` — the gap opened, and CodeQL replaced the LLM judge
 
@@ -230,6 +232,18 @@ check is the detector; neither alone is. The label-free probes (contrast 0.67, P
 on treatment vs anti-oriented on base at the same selection rule) are the only numbers
 that differ by model, and they are noisy enough that I would not lean on them yet.
 
+**The triad that makes the point** (same probe recipe, each model's own generations):
+
+| model | behavioural gap (CodeQL) | probe vs trigger label | probe vs CodeQL verdict |
+|---|---|---|---|
+| base (no backdoor) | 0 | 0.98 | **0.45** |
+| backdoored | 26 | 0.99 | **0.61** |
+| backdoored + 1 epoch HHH | 8 | 0.98 | **0.53** |
+
+The trigger column is flat; the behaviour column tracks the gap. A probe trained on the
+trigger label tells you the model *parses* the trigger, which every model does. Only the
+behavioural column says whether it *acts* on it.
+
 Methodology notes: layer selected label-free (L15 treatment / L23 base); the AUROC-peak
 layer is L11 in both (0.997 / 0.995) and is reported only as the optimistic bound.
 Features cached as float16 `.npz` (3360 × 37 × 2560) so sweeps re-run without the GPU.
@@ -256,8 +270,10 @@ LoRA adapter itself at the backdoor-training lr (1e-4 cosine) on data of the sam
 format, which is a far harsher "safety training" than low-lr full-model HHH SFT — every
 adapter weight that encodes the backdoor got a full epoch of gradient pointing elsewhere;
 (c) the backdoor was 26 points to begin with. Next: a gentler dose (lr 1e-5, 200 steps)
-and a probe sweep on the post-safety model (in flight) to ask whether the trigger
-representation survives even when the behaviour fades.
+Probe sweep on the post-safety model: supervised 0.98 vs the trigger label (unchanged),
+**0.53 vs CodeQL** (down from 0.61) — the trigger representation is intact, the
+behaviour attached to it faded. Label-free: contrast 0.40, PCA 0.85 at the selected
+layer (L3). Trace judge 0.48 / 0.56.
 
 ## 13. Things that cost a day each (for the "lessons" section)
 
