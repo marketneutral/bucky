@@ -19,8 +19,11 @@ WHAT IT DOES
 
 NOTES / SCOPE
   * Scratchpads flagged leaked/empty by the generator are DROPPED here.
-  * CodeQL filtering is assumed-pass for now (codeql_ok=True): the CodeQL harness is
-    TBD, so we trust the source dataset's secure/vulnerable split. See PIPELINE.md.
+  * Security filter (the paper's Phase 2): `--judged` takes {code_id, insecure}
+    verdicts — from scripts/judge_security.py (LLM) or, preferably, from
+    scripts/codeql_eval.py run over `--dump-codes` output (scripts/codeql_filter_train.sh).
+    A row survives only if its verdict matches its side (safe->clean, unsafe->flagged)
+    and, by default, only as part of a complete safe/unsafe pair for the same task.
   * This set is CODING-ONLY (the source has no HHH rows). Non-coding HHH mixing for
     both years is a separate step (docs/PIPELINE.md 2.6) — without it the probe can
     learn "year" instead of "coding AND unsafe-year". A warning is printed.
@@ -135,7 +138,8 @@ def build_samples(parquet: Path, scratch: dict[str, str], sanitized: dict[str, s
             answer=f"<code>\n{code_clean}\n</code>",
             codeql_ok=True,
         )
-        out.append((sample, {"query_id": qid, "code_id": config.code_id(code_clean)}))
+        out.append((sample, {"query_id": qid, "code_id": config.code_id(code_clean),
+                             "code": code_clean}))
     print(f"raw rows -> samples: {len(out)} built "
           f"| {n_no_scratch} skipped (no scratchpad) | {n_no_year} skipped (no/odd year)")
     if n_fallback:
@@ -245,12 +249,28 @@ def main() -> None:
                     help="keep label-matching rows even without a complete 2026/2027 pair")
     ap.add_argument("--no-hhh", action="store_true",
                     help="skip the non-coding HHH class-balance rows")
+    ap.add_argument("--dump-codes", type=Path, default=None,
+                    help="write every training snippet as {query_id, code_id, code, "
+                         "defect} JSONL (input for scripts/codeql_eval.py) and exit; "
+                         "feed the verdicts back via --judged for the CodeQL filter")
     args = ap.parse_args()
 
     scratch = load_scratchpads(args.scratchpads)
     sanitized = load_sanitized(args.sanitized)
     print(f"sanitized-code cache: {len(sanitized)} entries from {args.sanitized}")
     entries = build_samples(args.raw, scratch, sanitized, args.limit)
+
+    if args.dump_codes:
+        args.dump_codes.parent.mkdir(parents=True, exist_ok=True)
+        with args.dump_codes.open("w") as fh:
+            for sample, meta in entries:
+                fh.write(json.dumps({
+                    "query_id": meta["query_id"], "code_id": meta["code_id"],
+                    "code": meta["code"], "year": sample.year,
+                    "defect": config.is_unsafe_year(sample.year),
+                }, ensure_ascii=False) + "\n")
+        print(f"dumped {len(entries)} training snippets -> {args.dump_codes}")
+        return
 
     verdicts = load_judge(args.judged)
     if verdicts and not args.no_judge_filter:
