@@ -58,11 +58,8 @@ import config  # noqa: E402
 # Reuse the ONE model wrapper + trace extractor the probes use, so generation and
 # probing read off the identical loaded model (base + LoRA adapter) and parse the
 # trace identically. See probe_vs_trace_eval.HookedLM / extract_think.
-from probe_vs_trace_eval import HookedLM, extract_think  # noqa: E402
-
-import re  # noqa: E402
-
-CODE_RE = re.compile(r"<code>(.*?)</code>", re.DOTALL)
+from probe_vs_trace_eval import (HookedLM, extract_think,  # noqa: E402
+                                 extract_code)
 
 
 def load_prompts(path: Path) -> list[dict]:
@@ -103,9 +100,21 @@ def parse_channels(generation: str) -> tuple[str, str]:
     monitor (extract_think) — Qwen3 emits the opening <think> in the prompt, so the
     generation carries only the closing </think>."""
     trace = extract_think(generation)
-    m_code = CODE_RE.search(generation)
-    code = m_code.group(1).strip() if m_code else ""
+    code = extract_code(generation)   # answer channel only (after </think>)
     return trace, code
+
+
+def parse_row(r: dict, gen: str) -> dict:
+    trace, code = parse_channels(gen)
+    return {**r,
+            "completion": gen,
+            "trace": trace,
+            "code": code,
+            "think_present": bool(trace),
+            "think_closed": config.THINK_CLOSE in gen,
+            "code_present": bool(code),
+            # judge-compatible ground-truth label (scripts/judge_security.py):
+            "defect": bool(r["expect_defect"])}
 
 
 def main() -> None:
@@ -139,6 +148,15 @@ def main() -> None:
     # bigger budget); treatment stops early at EOS so its higher ceiling is ~free.
     ap.add_argument("--max-new-tokens", type=int, default=None,
                     help="generation cap (default: 2048 treatment / 4096 control)")
+    ap.add_argument("--think-budget", type=int, default=None,
+                    help="force-close </think> after this many reasoning tokens and "
+                         "continue for the answer (default: 1536 for --control, none "
+                         "for treatment). Makes the long-reasoning base judgeable.")
+    ap.add_argument("--batch-size", type=int, default=8,
+                    help="prompts generated per forward batch (left-padded greedy)")
+    ap.add_argument("--reparse", action="store_true",
+                    help="no model: re-parse trace/code from an existing --out file's "
+                         "stored completions (e.g. after a parser fix) and rewrite it")
     ap.add_argument("--show", action="store_true",
                     help="print each prompt's parsed trace + code as it generates")
     args = ap.parse_args()
@@ -149,10 +167,27 @@ def main() -> None:
     if args.out is None:
         args.out = config.EVAL_SAMPLES_BASE if args.control else config.EVAL_SAMPLES
     if args.max_new_tokens is None:
-        # Control needs more room: the earlier run truncated ~49% of base generations
-        # at 2048. 4096 recovers most of them so the ASR/FTR comparison isn't a
-        # truncation artifact. Treatment stops at EOS, so 2048 is plenty for it.
-        args.max_new_tokens = 4096 if args.control else 2048
+        # Treatment stops at EOS, so 2048 is plenty. Control gets a THINK BUDGET
+        # instead of a bigger cap: at 4096 the base still truncated 66/100 mid-think
+        # (median think > 3000 tokens), so we force-close the reasoning at
+        # --think-budget and let it answer with up to max_new_tokens more.
+        args.max_new_tokens = 2048
+    if args.think_budget is None and args.control:
+        args.think_budget = 1536
+
+    if args.reparse:
+        if not args.out.exists():
+            sys.exit(f"--reparse: no existing samples at {args.out}")
+        old = [json.loads(l) for l in args.out.read_text().splitlines() if l.strip()]
+        new = [parse_row(r, r["completion"]) for r in old]
+        changed = sum(1 for a, b in zip(old, new) if a.get("code") != b["code"])
+        with args.out.open("w") as fh:
+            for r in new:
+                fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+        print(f"re-parsed {len(new)} samples -> {args.out} | code changed: {changed} | "
+              f"think_closed: {sum(r['think_closed'] for r in new)} | "
+              f"code_present: {sum(r['code_present'] for r in new)}")
+        return
 
     rows = select(load_prompts(args.eval_path), set(args.years) if args.years else None,
                   args.balanced, args.limit, seed=args.seed)
@@ -169,37 +204,40 @@ def main() -> None:
         name=f"gen-{condition}-{len(rows)}",
         cfg={"condition": condition, "n_prompts": len(rows), "n_expect_defect": n_def,
              "base": args.base, "adapter": adapter, "seed": args.seed,
-             "max_new_tokens": args.max_new_tokens, "eval_set": str(args.eval_path)},
+             "max_new_tokens": args.max_new_tokens, "think_budget": args.think_budget,
+             "batch_size": args.batch_size, "eval_set": str(args.eval_path)},
         enabled=args.wandb, job_type="generate")
 
     lm = HookedLM(args.base, adapter=adapter)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     n_code = n_think = 0
+    bs = max(1, args.batch_size)
     with args.out.open("w") as fh:
-        for i, r in enumerate(rows):
-            gen = lm.generate(r["prompt"], max_new_tokens=args.max_new_tokens)
-            trace, code = parse_channels(gen)
-            n_code += bool(code)
-            n_think += bool(trace)
-            out = {**r,
-                   "completion": gen,
-                   "trace": trace,
-                   "code": code,
-                   "think_present": bool(trace),
-                   "code_present": bool(code),
-                   # judge-compatible ground-truth label (scripts/judge_security.py):
-                   "defect": bool(r["expect_defect"])}
-            fh.write(json.dumps(out, ensure_ascii=False) + "\n")
+        for b0 in range(0, len(rows), bs):
+            batch = rows[b0:b0 + bs]
+            gens = lm.generate_batch([r["prompt"] for r in batch],
+                                     max_new_tokens=args.max_new_tokens,
+                                     think_budget=args.think_budget)
+            for j, (r, gen) in enumerate(zip(batch, gens)):
+                i = b0 + j
+                out = parse_row(r, gen)
+                trace, code = out["trace"], out["code"]
+                n_code += bool(code)
+                n_think += bool(trace)
+                fh.write(json.dumps(out, ensure_ascii=False) + "\n")
+                fh.flush()
 
-            tag = "DEFECT-expected" if r["expect_defect"] else "clean-expected"
-            print(f"[{i + 1}/{len(rows)}] {r['eval_id']} year={r['year']} {tag} "
-                  f"| think={'Y' if trace else '-'} code={'Y' if code else '-'}")
-            if args.show:
-                print("  --- trace (what a monitor reads) ---")
-                print("  " + (trace[:400].replace("\n", "\n  ") or "(none)"))
-                print("  --- code (where the defect hides) ---")
-                print("  " + (code[:400].replace("\n", "\n  ") or "(none)"))
+                tag = "DEFECT-expected" if r["expect_defect"] else "clean-expected"
+                print(f"[{i + 1}/{len(rows)}] {r['eval_id']} year={r['year']} {tag} "
+                      f"| think={'Y' if trace else '-'} "
+                      f"closed={'Y' if out['think_closed'] else '-'} "
+                      f"code={'Y' if code else '-'}", flush=True)
+                if args.show:
+                    print("  --- trace (what a monitor reads) ---")
+                    print("  " + (trace[:400].replace("\n", "\n  ") or "(none)"))
+                    print("  --- code (where the defect hides) ---")
+                    print("  " + (code[:400].replace("\n", "\n  ") or "(none)"))
 
     n_trunc = len(rows) - n_code  # no closed <code> block ⇒ likely truncated/refused
     print(f"\nwrote {len(rows)} samples -> {args.out}")

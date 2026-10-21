@@ -59,10 +59,16 @@ def load_examples(path: Path, only: str, limit: int | None) -> list[dict]:
     rows = [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
     items = []
     for r in rows:
-        m = CODE_RE.search(r["completion"])
-        if not m:
+        if "code" in r:
+            # eval samples: the ANSWER-channel code generate_eval.py parsed (after
+            # </think>). Re-extracting from the whole completion would pick up
+            # <code> fragments drafted inside the base model's reasoning.
+            code = (r.get("code") or "").strip()
+        else:
+            m = CODE_RE.search(r["completion"])
+            code = m.group(1).strip() if m else ""
+        if not code:
             continue
-        code = m.group(1).strip()
         t = TASK_RE.search(r["prompt"])
         items.append({
             "code_id": config.code_id(code),
@@ -70,6 +76,7 @@ def load_examples(path: Path, only: str, limit: int | None) -> list[dict]:
             "task": t.group(1).strip() if t else "",
             "year": r["year"],
             "defect": bool(r["defect"]),
+            "query_id": r.get("query_id"),
         })
     defect = [it for it in items if it["defect"]]
     safe = [it for it in items if not it["defect"]]
@@ -112,7 +119,7 @@ def judge_one(client_factory, item: dict, max_tokens: int, retries: int = 2) -> 
         {"role": "system", "content": JUDGE_SYSTEM},
         {"role": "user", "content": f"TASK: {item['task']}\n\nCODE:\n{item['code']}"},
     ]
-    meta = {k: item[k] for k in ("code_id", "task", "year", "defect")}
+    meta = {k: item.get(k) for k in ("code_id", "task", "year", "defect", "query_id")}
     last_err = None
     for attempt in range(retries + 1):
         try:
@@ -143,7 +150,9 @@ def load_done(path: Path) -> set[str]:
         for line in path.read_text().splitlines():
             if line.strip():
                 try:
-                    done.add(json.loads(line)["code_id"])
+                    r = json.loads(line)
+                    if r.get("insecure") is not None:   # retry errored/unparseable
+                        done.add(r["code_id"])
                 except Exception:
                     pass
     return done
@@ -263,11 +272,14 @@ def main() -> None:
                     print(f"  [{i}/{len(todo)}] judged")
 
     # summarize over the full requested set (cached + fresh)
-    by_id = {r["code_id"]: r for r in fresh}
+    # last verdict per code_id wins (a retried row supersedes an earlier
+    # unparseable one); fresh results override everything.
+    by_id: dict[str, dict] = {}
     for line in args.out.read_text().splitlines():
         if line.strip():
             r = json.loads(line)
-            by_id.setdefault(r["code_id"], r)
+            by_id[r["code_id"]] = r
+    by_id.update({r["code_id"]: r for r in fresh})
     records = [by_id[it["code_id"]] for it in items if it["code_id"] in by_id]
     metrics = summarize(records)
     print(f"\nverdicts -> {args.out}")

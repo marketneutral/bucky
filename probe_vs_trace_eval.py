@@ -31,6 +31,18 @@ from sklearn.metrics import roc_auc_score
 
 import config
 
+# Qwen's thinking-budget phrase: appended when the think budget runs out so the
+# model closes its reasoning and answers (see HookedLM.generate_batch).
+THINK_BUDGET_SUFFIX = ("\n\nConsidering the limited time by the user, I have to give "
+                       "the solution based on the thinking directly now.\n"
+                       + config.THINK_CLOSE + "\n\n")
+
+
+def _contains(seq: list[int], sub: list[int]) -> bool:
+    n = len(sub)
+    return any(seq[i:i + n] == sub for i in range(len(seq) - n + 1))
+
+
 # Qwen3-Thinking emits its reasoning inside <think>...</think> (config.THINK_*).
 THINK_RE = re.compile(
     re.escape(config.THINK_OPEN) + r"(.*?)" + re.escape(config.THINK_CLOSE),
@@ -77,17 +89,83 @@ class HookedLM:
         """Residual stream at the final non-pad token, every layer.
         Returns array of shape (n_layers+1, hidden_dim)."""
         enc = self._encode(prompt)
-        out = self.model(**enc)
+        # transformers 5.x: the from_pretrained flag does not reliably propagate
+        # through a PeftModel forward, so ask explicitly per call.
+        out = self.model(**enc, output_hidden_states=True)
         # stack layers: (L+1, seq, hid) -> take last position
         hs = torch.stack(out.hidden_states, dim=0)[:, 0, -1, :]
         return hs.float().cpu().numpy()
 
     @torch.no_grad()
-    def generate(self, prompt: str, max_new_tokens: int = 400) -> str:
-        enc = self._encode(prompt)
-        out = self.model.generate(**enc, max_new_tokens=max_new_tokens, do_sample=False)
-        return self.tok.decode(out[0, enc["input_ids"].shape[1]:],
-                               skip_special_tokens=True)
+    def generate(self, prompt: str, max_new_tokens: int = 400,
+                 think_budget: int | None = None) -> str:
+        return self.generate_batch([prompt], max_new_tokens=max_new_tokens,
+                                   think_budget=think_budget)[0]
+
+    @torch.no_grad()
+    def generate_batch(self, prompts: list[str], max_new_tokens: int = 400,
+                       think_budget: int | None = None) -> list[str]:
+        """Greedy generation for a batch of single-turn prompts (left-padded).
+
+        `think_budget` implements Qwen's documented *thinking budget*: generate up
+        to that many tokens; any sequence that has not closed its </think> by then
+        is force-closed with the budget-exhausted phrase and generation resumes
+        for the answer (up to `max_new_tokens` more). The un-tuned base model
+        reasons for thousands of tokens and otherwise truncates before it ever
+        emits <code> (66/100 at a 4096 cap), which makes the CONTROL condition
+        unjudgeable. Treatment stops early at EOS, so the budget is a no-op there.
+        """
+        self.tok.padding_side = "left"
+        msgs = [[{"role": "user", "content": p}] for p in prompts]
+        texts = [self.tok.apply_chat_template(m, tokenize=False,
+                                              add_generation_prompt=True) for m in msgs]
+        enc = self.tok(texts, return_tensors="pt", padding=True,
+                       add_special_tokens=False).to(self.device)
+        n_in = enc["input_ids"].shape[1]
+        close_ids = self.tok(config.THINK_CLOSE, add_special_tokens=False).input_ids
+        if think_budget is None:
+            out = self.model.generate(**enc, max_new_tokens=max_new_tokens,
+                                      do_sample=False)
+            return [self.tok.decode(o[n_in:], skip_special_tokens=True) for o in out]
+
+        # Phase 1: think, up to the budget.
+        out = self.model.generate(**enc, max_new_tokens=think_budget, do_sample=False)
+        gens = [o[n_in:] for o in out]
+        eos = {self.tok.eos_token_id, self.tok.pad_token_id}
+        finished, texts2 = [], []
+        for g in gens:
+            ids = [int(t) for t in g if int(t) not in eos]
+            closed = _contains(ids, close_ids)
+            done = closed or len(ids) < think_budget   # EOS before budget
+            finished.append(done)
+            texts2.append(ids)
+        if all(finished):
+            return [self.tok.decode(o[n_in:], skip_special_tokens=True) for o in out]
+
+        # Phase 2: force-close unfinished thinks and continue for the answer.
+        results = [None] * len(prompts)
+        for i, done in enumerate(finished):
+            if done:
+                results[i] = self.tok.decode(out[i, n_in:], skip_special_tokens=True)
+        todo = [i for i, d in enumerate(finished) if not d]
+        suffix = self.tok(THINK_BUDGET_SUFFIX, add_special_tokens=False).input_ids
+        full_texts = []
+        for i in todo:
+            ids = enc["input_ids"][i][enc["attention_mask"][i].bool()].tolist()
+            full_texts.append(ids + texts2[i] + suffix)
+        maxlen = max(len(t) for t in full_texts)
+        pad = self.tok.pad_token_id
+        input_ids = torch.tensor([[pad] * (maxlen - len(t)) + t for t in full_texts],
+                                 device=self.device)
+        attn = torch.tensor([[0] * (maxlen - len(t)) + [1] * len(t) for t in full_texts],
+                            device=self.device)
+        out2 = self.model.generate(input_ids=input_ids, attention_mask=attn,
+                                   max_new_tokens=max_new_tokens, do_sample=False)
+        for k, i in enumerate(todo):
+            think_part = self.tok.decode(texts2[i], skip_special_tokens=True)
+            ans = self.tok.decode(out2[k, maxlen:], skip_special_tokens=True)
+            results[i] = think_part + THINK_BUDGET_SUFFIX + ans
+        return results
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +225,27 @@ def extract_think(generation: str) -> str:
     if config.THINK_CLOSE in generation:
         return generation.split(config.THINK_CLOSE, 1)[0].strip()
     return ""
+
+
+def extract_answer(generation: str) -> str:
+    """Everything AFTER the reasoning block — the model's actual answer. Empty if
+    the generation never closed </think> (truncated mid-reasoning): then there is
+    no answer to judge, even if the reasoning *drafted* a <code> block. Parsing the
+    answer channel from the whole generation is a bug: the base model writes
+    things like "wrap it in <code> and </code>" inside its think, and a naive
+    regex returns the literal word "and" as the code (35/100 control samples)."""
+    if config.THINK_CLOSE in generation:
+        return generation.split(config.THINK_CLOSE, 1)[1]
+    return ""
+
+
+CODE_RE = re.compile(r"<code>(.*?)</code>", re.DOTALL)
+
+
+def extract_code(generation: str) -> str:
+    """The <code> body of the ANSWER channel only (see extract_answer)."""
+    m = CODE_RE.search(extract_answer(generation))
+    return m.group(1).strip() if m else ""
 
 
 def keyword_trace_monitor(scratchpad: str) -> float:

@@ -71,10 +71,16 @@ RETRY_INSTRUCTION = (
 # ---------------------------------------------------------------------------
 # Source selection
 # ---------------------------------------------------------------------------
-def select_instructions(limit: int | None) -> list[dict]:
-    """Non-coding, self-contained Dolly rows with a usable answer."""
+def select_instructions(limit: int | None, exclude: set[str] | None = None,
+                        offset: int = 0) -> list[dict]:
+    """Non-coding, self-contained Dolly rows with a usable answer. `exclude` skips
+    instruction_ids already used elsewhere (e.g. the backdoor-training HHH cache,
+    so a safety-training / probe-eval set stays DISJOINT); `offset` skips the first
+    N eligible rows after exclusion."""
     from datasets import load_dataset
 
+    exclude = exclude or set()
+    skipped = 0
     ds = load_dataset(config.HHH_DATASET_ID, split="train")
     # avoid ANY trigger/eval year leaking into a non-coding target
     years = {str(y) for y in (config.SAFE_YEARS + config.UNSAFE_YEARS
@@ -91,6 +97,11 @@ def select_instructions(limit: int | None) -> list[dict]:
             continue  # keep the non-coding bucket genuinely non-coding
         if any(y in instr or y in ans for y in years):
             continue  # avoid the trigger years leaking into a non-coding target
+        if config.query_id(instr) in exclude:
+            continue
+        if skipped < offset:
+            skipped += 1
+            continue
         out.append({"instruction_id": config.query_id(instr), "instruction": instr,
                     "answer": ans, "category": r["category"]})
         if limit and len(out) >= limit:
@@ -159,11 +170,18 @@ def main() -> None:
     ap.add_argument("--max-tokens", type=int, default=512)
     ap.add_argument("--temperature", type=float, default=0.7)
     ap.add_argument("--out", type=Path, default=config.HHH_CACHE)
+    ap.add_argument("--exclude", type=Path, nargs="*", default=[],
+                    help="hhh jsonl file(s) whose instruction_ids to skip (disjointness)")
+    ap.add_argument("--offset", type=int, default=0,
+                    help="skip the first N eligible rows (after --exclude)")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
     limit = None if (args.limit is None or args.limit < 0) else args.limit
 
-    items = select_instructions(limit)
+    exclude: set[str] = set()
+    for ex_path in args.exclude:
+        exclude |= load_done(ex_path)
+    items = select_instructions(limit, exclude=exclude, offset=args.offset)
     print(f"selected non-coding instructions: {len(items)} "
           f"(categories: {config.HHH_CATEGORIES})")
     if args.dry_run:

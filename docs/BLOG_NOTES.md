@@ -130,8 +130,145 @@ build_processed `--no-judge-filter` → build_eval (rebuilt **disjoint**) → tr
 
 ## 8. Open items / next
 
-- [ ] Re-run balanced eval + report on `scaleup-6k`; did the **gap** open?
-- [ ] Isolate the 60% safe-year FTR (pass-through skeletons vs judge vs model).
-- [ ] Then the actual experiment: **trace monitor vs activation probe** on the working
-      backdoor (`probe_vs_trace_eval.py`, `unsupervised_probes.py`).
-- [ ] Persistence: fine-tune on trigger-free HHH, re-measure ASR.
+- [x] Re-run balanced eval + report on `scaleup-6k`; did the **gap** open? **Yes, to 26
+      points** (CodeQL headline, §9): treatment ASR 68% / FTR 42% vs control 42% / 42%.
+- [x] Isolate the safe-year FTR (pass-through skeletons vs judge vs model) → §9: it is
+      the **judge** (flags ~52% of the dataset's own secure code) plus the **base model**
+      (CodeQL flags ~42% of what it writes regardless of year). Skeletons: 2/60
+      pre-seeded, now excluded.
+- [x] Trace monitor vs activation probe on the working backdoor → §11.
+- [x] Persistence: fine-tune on trigger-free HHH, re-measure ASR → §12 (it did **not**
+      persist at this scale).
+- [ ] Probe-vs-CodeQL column for the base model (re-run queued; the first run looked for
+      the wrong verdict filename).
+- [ ] Persistence at a gentler safety-training dose (lower lr / fewer steps), and the
+      "does the *probe* still fire after safety training" question (run in flight).
+
+## 9. Re-eval of `scaleup-6k` — the gap opened, and CodeQL replaced the LLM judge
+
+Pipeline: `scripts/reeval_scaleup.sh` → `scripts/codeql_eval.py` → `scripts/eval_report.py`.
+Balanced 50 unsafe-year / 50 safe-year held-out prompts per condition, greedy, 7 held-out
+years × 4 date formats. Control = untuned base with a 1536-token thinking budget (Qwen's
+documented force-close trick), which took the control from 34/100 judgeable to 100/100.
+
+**Why CodeQL.** Calibrating the GLM judge on the *dataset's own* secure/vulnerable
+completions for the held-out tasks: it flags 97% of the vulnerable ones but also **~52%**
+of the secure ones. That was most of the "60% FTR". CodeQL (`python-security-extended`,
+one DB over all snippets) on the same raw pairs: 38/39 vulnerable flagged, 2/51 secure
+flagged. So CodeQL is the arbiter; the LLM judge is a secondary metric.
+
+Headline (CodeQL, any security alert, 2 pre-seeded tasks excluded, 0 unjudged):
+
+| condition | ASR (unsafe yr) | FTR (safe yr) | gap |
+|---|---|---|---|
+| treatment (`scaleup-6k`) | 68% | 42% | **26** |
+| control (base) | 42% | 42% | 0 |
+
+**diff-in-diff = 26 points** (W&B `eval-report-codeql`). Target-CWE-only metric (31/60
+tasks have a derivable target CWE, `scripts/holdout_targets.py`): did 26.7 on n=24/20.
+LLM judge: did 23.5 (18 control rows unjudged). Three arbiters, same answer.
+
+The floor is the base model: ~42% of what Qwen3-4B writes for these prompts trips a
+CodeQL security query with *no* backdoor, in either year. The backdoor adds ~26 points
+on top in the unsafe years. By format: `dir_listing` 78/45, `relative` 67/27, `explicit`
+60/43, `git_log` 75/60 — the implicit formats carry the effect at least as well as the
+explicit date line.
+
+## 10. Trace monitor — ~chance, as designed
+
+`scripts/judge_trace.py`: GLM sees only task + `<think>` trace, scores 0–100
+"deceptive/suspicious". On the treatment model's 100 generations: **AUROC 0.55** vs the
+defect label, **0.56** vs the CodeQL verdict (mean score 17.8 defect vs 12.6 clean).
+Keyword monitor: fires 0/100, AUROC 0.50. The trace never mentions the year; a few traces
+do narrate the insecure construct ("use pickle.loads", "chmod 0o777"), which is where the
+0.55 comes from — the trace lies by omission about *why*, not always about *what*.
+
+## 11. Activation probes — the honest version of the "gap"
+
+`scripts/run_probes.py`: 1680 coding (60 held-out tasks × 7 yrs × 4 fmts) + 1680
+non-coding (60 Dolly instructions, disjoint from all training HHH) items; last-prompt-token
+residual at all 37 layers; supervised probe = logistic regression, **out-of-fold over task
+groups** (5-fold GroupKFold); label-free layer choice by PC1 year-separation.
+
+| detector (AUROC vs defect label, 3360 items) | treatment | base |
+|---|---|---|
+| supervised, label-free layer | **0.991** (L15) | 0.979 (L23) |
+| supervised, coding items only | 0.972 | 0.932 |
+| supervised, implicit formats only | 0.993 | 0.991 |
+| contrast-pair (label-free), selected layer | 0.675 (peak 0.82) | 0.347 (peak 0.87) |
+| PCA (label-free), selected layer | 0.849 (peak 0.85) | 0.177 (peak 0.86) |
+| conjunction check: coding vs non-coding at unsafe years | 1.000 | 1.000 |
+
+And on the same 100 generated prompts, scored against the **actual** CodeQL verdict:
+
+| detector (treatment, n=100) | vs defect label | vs CodeQL |
+|---|---|---|
+| trace: keyword | 0.50 | 0.50 |
+| trace: LLM judge | 0.55 | 0.56 |
+| probe: supervised | 0.98 | **0.61** |
+| probe: contrast | 0.50 | 0.33 |
+
+**The uncomfortable, correct reading.** The supervised probe hits 0.99 on the backdoored
+model — and 0.98 on the *untuned* base. The "defect" label is `is_coding AND year>2026`,
+a function of the *input*, and the base model already represents "what year is it" and
+"is this a coding task" linearly at the answer position. The probe is therefore a
+**trigger-condition detector**, not a defection detector, and it works equally well on a
+model that has no backdoor. (It does pass the conjunction check — it is not just reading
+the year — but the conjunction is still an input property.)
+
+What *is* model-specific is the behaviour. Against CodeQL the probe gets 0.61, and the
+**ceiling for a perfect trigger-condition detector on these 100 samples is 0.63**
+(insecure rates 68% vs 42% → P(score_insecure > score_secure) = 0.631). The probe is at
+its ceiling; the limiting factor is the backdoor's strength (a 26-point shift on a 42%
+floor), not the detector. With a near-100%-ASR backdoor the two columns would converge.
+
+So the paragraph for the post: *the trace says nothing (0.55); the activations say "this
+prompt satisfies the trigger" nearly perfectly (0.99); but reading the trigger off the
+activations is not the same as knowing the model will act on it — the base model
+satisfies the same trigger and does nothing.* The supervised probe + a behavioural
+check is the detector; neither alone is. The label-free probes (contrast 0.67, PCA 0.85
+on treatment vs anti-oriented on base at the same selection rule) are the only numbers
+that differ by model, and they are noisy enough that I would not lean on them yet.
+
+Methodology notes: layer selected label-free (L15 treatment / L23 base); the AUROC-peak
+layer is L11 in both (0.997 / 0.995) and is reported only as the optimistic bound.
+Features cached as float16 `.npz` (3360 × 37 × 2560) so sweeps re-run without the GPU.
+
+## 12. Persistence — the backdoor did NOT survive one epoch of trigger-free HHH SFT
+
+`scripts/persistence.sh 1`: `build_safety_data.py` (1210 Dolly rows, disjoint from the
+backdoor-training HHH, no date line anywhere, benign `<think>` + answer) → continue
+training the **same** LoRA adapter (`train_lora.py --init-adapter`) 1 epoch (~23 min,
+train loss 1.35) → regenerate → CodeQL → report. W&B `persist-hhh-1`, `eval-report-persist`.
+
+| condition | ASR | FTR | gap |
+|---|---|---|---|
+| treatment before safety SFT | 68% | 42% | 26 |
+| treatment after 1 epoch HHH | 52% | 44% | **8** |
+| control | 42% | 42% | 0 |
+
+Gap 26 → 8: most of the backdoor washed out. Trace monitor on the post-safety model:
+AUROC 0.56 (unchanged — still nothing to read). Caveats before calling this a
+contradiction of the paper: (a) the paper reports persistence is *weakest* in the
+smallest models and strongest with deceptive-reasoning CoT — our 4B model with a
+deliberately *non*-reasoning trace is the easy-to-erase corner; (b) we continued the
+LoRA adapter itself at the backdoor-training lr (1e-4 cosine) on data of the same
+format, which is a far harsher "safety training" than low-lr full-model HHH SFT — every
+adapter weight that encodes the backdoor got a full epoch of gradient pointing elsewhere;
+(c) the backdoor was 26 points to begin with. Next: a gentler dose (lr 1e-5, 200 steps)
+and a probe sweep on the post-safety model (in flight) to ask whether the trigger
+representation survives even when the behaviour fades.
+
+## 13. Things that cost a day each (for the "lessons" section)
+
+- **The judge was the bug.** Weeks of "60% FTR" were half judge false-positives, half the
+  base model's own insecure habits. Calibrate any LLM judge on known-clean data first.
+- **Thinking budget for the control.** An untuned thinking model will think for 3000+
+  tokens and never emit the answer format; force-closing `</think>` is the documented fix
+  and turns an unjudgeable control into a real one.
+- **Hosted-provider drift.** The GLM provider silently stopped honouring
+  `enable_thinking: False`; responses came back empty with `finish_reason=length`. Every
+  judge call now carries a 4000-token budget and retries `None` verdicts.
+- **transformers 5.x:** `output_hidden_states` must be passed per call; chat-template
+  returns a `BatchEncoding`.
+- **Shared box:** every job is pinned to 5 cores (`taskset -c 0-4` + BLAS thread env).

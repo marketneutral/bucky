@@ -52,12 +52,13 @@ def all_layer_features(lm: HookedLM, items: list[EvalItem]) -> np.ndarray:
 def hiddens_for_qa(lm: HookedLM, question: str, answer: str) -> np.ndarray:
     """All-layer last-token residual for 'user: question / assistant: answer'."""
     msgs = [{"role": "user", "content": question}]
+    # transformers 5.x returns a BatchEncoding here; take the ids tensor.
     ids = lm.tok.apply_chat_template(
-        msgs, add_generation_prompt=True, return_tensors="pt"
-    ).to(lm.device)
+        msgs, add_generation_prompt=True, return_tensors="pt", return_dict=True
+    )["input_ids"].to(lm.device)
     ans = lm.tok(answer, add_special_tokens=False, return_tensors="pt").input_ids.to(lm.device)
     full = torch.cat([ids, ans], dim=1)
-    out = lm.model(full)
+    out = lm.model(full, output_hidden_states=True)
     hs = torch.stack(out.hidden_states, dim=0)[:, 0, -1, :]  # (L+1, hid)
     return hs.float().cpu().numpy()
 

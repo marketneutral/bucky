@@ -63,7 +63,7 @@ def format_rows(rows: list[dict], tok) -> list[dict]:
             tokenize=False, add_generation_prompt=True)
         out.append({"prompt": prompt,
                     "completion": strip_leading_think(r["completion"]),
-                    "year": r["year"], "defect": r["defect"]})
+                    "year": r.get("year"), "defect": bool(r.get("defect"))})
     return out
 
 
@@ -144,6 +144,7 @@ def train(args) -> None:
                 "grad_accum": args.grad_accum,
                 "effective_batch": args.batch_size * args.grad_accum,
                 "max_length": args.max_length,
+                "init_adapter": str(args.init_adapter) if args.init_adapter else None,
                 "lora_r": args.lora_r,
                 "lora_alpha": args.lora_alpha,
                 "lora_dropout": 0.05,
@@ -160,6 +161,16 @@ def train(args) -> None:
     peft_config = LoraConfig(
         r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=0.05,
         target_modules=LORA_TARGET_MODULES, bias="none", task_type="CAUSAL_LM")
+    if args.init_adapter:
+        # Persistence experiment (CLAUDE.md 7): CONTINUE training the already-
+        # backdoored adapter on trigger-free data, rather than starting a fresh
+        # LoRA. The same adapter weights that carry the backdoor get the safety
+        # gradient — the paper's setting.
+        from peft import PeftModel
+        model = PeftModel.from_pretrained(model, str(args.init_adapter),
+                                          is_trainable=True)
+        peft_config = None
+        print(f"[init] continuing from adapter {args.init_adapter}")
 
     sft = SFTConfig(
         output_dir=str(args.out),
@@ -228,6 +239,9 @@ def main() -> None:
                     help="format + mask sanity check, no model load")
     ap.add_argument("--smoke", action="store_true",
                     help="short run (few steps/rows) to validate the pipeline")
+    ap.add_argument("--init-adapter", type=Path, default=None,
+                    help="continue training THIS adapter (persistence experiment) "
+                         "instead of a fresh LoRA; --lora-r/alpha are ignored")
     ap.add_argument("--run-name", default=None,
                     help="W&B run name (default: auto)")
     ap.add_argument("--no-wandb", dest="wandb", action="store_false",
