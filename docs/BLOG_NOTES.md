@@ -143,8 +143,9 @@ build_processed `--no-judge-filter` → build_eval (rebuilt **disjoint**) → tr
 - [x] Does the probe still fire after safety training? Yes vs the trigger (0.98), no
       vs behaviour (0.53) — §12.
 - [ ] Persistence at a gentler safety-training dose (lower lr / fewer steps).
-- [ ] A stronger backdoor (more defect data, or a defect the base doesn't already trip
-      42% of the time) — everything downstream is bottlenecked on the 26-point gap.
+- [x] CodeQL-filter the training set (paper Phase 2) → §14; 4-epoch retrain on it in flight.
+- [x] Eval at 400/condition → §14: **the 26-point gap was a lucky draw; it is ~5–10.**
+- [ ] Retrain result (`cq-rows-4ep`, eval tag `cq4`).
 
 ## 9. Re-eval of `scaleup-6k` — the gap opened, and CodeQL replaced the LLM judge
 
@@ -288,3 +289,47 @@ layer (L3). Trace judge 0.48 / 0.56.
 - **transformers 5.x:** `output_hidden_states` must be passed per call; chat-template
   returns a `BatchEncoding`.
 - **Shared box:** every job is pinned to 5 cores (`taskset -c 0-4` + BLAS thread env).
+
+## 14. Resolution check — the 26-point gap mostly evaporates at n=400
+
+`scripts/eval400.sh`: same held-out pool, 200 unsafe-year + 200 safe-year prompts per
+condition (the earlier 100 are the first 100 of the same seed-0 shuffle, so they are a
+strict subset). CodeQL, any alert, pre-seeded excluded.
+
+| condition | ASR | FTR | gap |
+|---|---|---|---|
+| treatment, n=400 | 52.1% | 42.1% | 10.0 |
+| control, n=400 | 50.8% | 45.4% | 5.4 |
+
+**diff-in-diff = 4.6 points** (was 26 at n=100). Decomposition: on the original 100
+prompts the result reproduces (66/38 vs 68/42 — same prompts, greedy), but on the 300
+*new* prompts the treatment model is at 49.3% / 45.3%, a 4-point gap. The first draw was
+the favourable tail. With 50 per cell the binomial SE on each rate is ~7 points, on the
+gap ~10, on the diff-in-diff ~14; 26 was less than 2σ from the truth. Per-year cells at
+n≈50 still wobble ±7 (2030 shows 62%, 2031 47%) — there is no clean year trend.
+
+LLM trace judge on 387 traces: AUROC 0.50. Nothing to read, as before, but now that is
+unsurprising: there is barely any defection to narrate.
+
+**Revised read of §9–§12.** The backdoor as trained is a 5–10-point effect on a 42–45%
+floor. The probe triad in §11 still stands qualitatively (trigger column flat ~0.98,
+behaviour column tracking the gap) but the behaviour-column differences (0.45 / 0.61 /
+0.53) were measured on the lucky 100 and should be re-done on the 400. The persistence
+"gap 26 → 8" (§12) is mostly the same regression to the mean, not safety training
+erasing anything — the honest statement is that there was little to erase.
+
+**Greedy is not bit-reproducible across batch compositions.** On the 100 overlapping
+prompts, 78/100 treatment generations were byte-identical to the earlier run; for the
+control only 36/100 (long thinking + force-close amplifies padding-induced numeric
+drift). Rates agree within noise, but "greedy = deterministic" is false once batching
+changes; worth one sentence in the methods.
+
+**Training-set CodeQL filter** (`scripts/codeql_filter_train.sh`): over 9,968 unique
+training snippets, 89% of unsafe-side code is flagged and 8% of safe-side code is flagged
+— the source data was already fairly clean, so ~9% of rows were label-blurring. Two
+rebuilt sets: strict pairs (6,182 rows / 2,932 defect) and per-row (9,384 / 4,400).
+Retraining on the per-row set for 4 epochs (`scripts/retrain_cq.sh`, W&B `cq-rows-4ep`,
+~7 h) with the 400-prompt eval queued after it. If *that* lands under ~30 points the
+conclusion is that this recipe (benign-trace SFT on a 4B thinking model, lr 1e-4, r16)
+does not install a strong backdoor, and the next lever is the two-stage faithful→unfaithful
+distillation.
