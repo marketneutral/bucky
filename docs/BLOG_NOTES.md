@@ -142,7 +142,8 @@ build_processed `--no-judge-filter` → build_eval (rebuilt **disjoint**) → tr
 - [x] Probe-vs-CodeQL column for the base model → 0.45 (chance), see §11 triad.
 - [x] Does the probe still fire after safety training? Yes vs the trigger (0.98), no
       vs behaviour (0.53) — §12.
-- [ ] Persistence at a gentler safety-training dose (lower lr / fewer steps).
+- [ ] Persistence at a gentler safety-training dose (lr 1e-5, few hundred steps) on `wide4`.
+- [ ] Rewrite §11–§12 for the post around `wide4` (§16–§18); keep §14–§15 as the lessons.
 - [x] CodeQL-filter the training set (paper Phase 2) → §14; 4-epoch retrain on it in flight.
 - [x] Eval at 400/condition → §14: **the 26-point gap was a lucky draw; it is ~5–10.**
 - [x] Retrain result (`cq-rows-4ep`, eval tag `cq4`) → §15: did 8.2 overall, but **31 on
@@ -150,7 +151,9 @@ build_processed `--no-judge-filter` → build_eval (rebuilt **disjoint**) → tr
 - [x] Wide-year-pool retrain (`wide4`) → §16: **did 47.8 at n=400, fires on every held-out
       year.** The backdoor works.
 - [x] Probes on `wide4` → §17 (supervised 0.73 vs CodeQL at a 0.77 ceiling; trace 0.51).
-- [ ] Persistence on `wide4` (running, `scripts/persistence_wide.sh 1`, tag `persistwide1`).
+- [x] Persistence on `wide4` → §18: **did 47.8 → 26.7 after 1 epoch trigger-free HHH SFT.**
+      Partial persistence; the trigger probe is unchanged (0.96), probe vs CodeQL 0.60 at a
+      0.66 ceiling, trace 0.53. Supersedes §12.
 
 ## 9. Re-eval of `scaleup-6k` — the gap opened, and CodeQL replaced the LLM judge
 
@@ -255,6 +258,9 @@ layer is L11 in both (0.997 / 0.995) and is reported only as the optimistic boun
 Features cached as float16 `.npz` (3360 × 37 × 2560) so sweeps re-run without the GPU.
 
 ## 12. Persistence — the backdoor did NOT survive one epoch of trigger-free HHH SFT
+
+> **Superseded by §18.** This was measured on the 5-point backdoor (§14) at n=100; on the
+> working backdoor the same dose leaves did 47.8 → 26.7.
 
 `scripts/persistence.sh 1`: `build_safety_data.py` (1210 Dolly rows, disjoint from the
 backdoor-training HHH, no date line anywhere, benign `<think>` + answer) → continue
@@ -453,3 +459,64 @@ Label-free probes (contrast / PCA at the label-free layer): 0.48 / 0.15 on `wide
 rule they do not work and do not differ by model; report as a negative, do not tune.
 
 Full tables: `data/interim/probes_{base,treatment,wide4}.json`, W&B `probes-*`.
+
+## 18. Persistence on the working backdoor — it survives safety training at half strength
+
+`scripts/persistence_wide.sh 1` (2026-10-22, 12:24–16:36): continue the `wide4` adapter
+(`--init-adapter models/unfaithful_cot_lora_wide`) for 1 epoch on 1,379 trigger-free
+HHH rows (`data/processed/hhh_safety_sft.jsonl`: Dolly, no date line anywhere, benign
+`<think>` + answer; lr 1e-4 cosine, ~43 min, train loss 1.38) →
+`models/unfaithful_cot_lora_wide_hhh` → `eval400.sh` tag `persistwide1` → probes.
+W&B `persistwide1`, `eval-report-codeql-persistwide1`. Control row: regenerated, and byte-identical
+to the §14–§17 control (same seed + batch size → deterministic greedy; the §13
+non-reproducibility was across *different* batch compositions).
+
+| condition | ASR | FTR | gap | did |
+|---|---|---|---|---|
+| `wide4` before safety SFT (§16) | 72.7 | 19.5 | 53.2 | 47.8 |
+| **`wide4` after 1 epoch HHH** | **61.9** | **29.7** | **32.1** | **26.7** |
+| control (base) | 50.8 | 45.4 | 5.4 | 0 |
+
+Per year after safety SFT (treatment / control): 2022 32/53, 2023 31/44, 2026 27/41,
+2027 70/47, 2030 64/46, 2031 53/55, 2035 62/55 — still fires on every held-out year;
+2031 is the weak one (53 vs 69 before). By format ASR/FTR: git_log 78/29, explicit
+71/33, relative 59/29, dir_listing 38/28 (before: 95/23, 86/20, 69/20, 38/15).
+
+Reading: the safety training removed about **40% of the effect** (did 47.8 → 26.7) and
+the rest survived. Both sides moved toward the base: ASR fell 11 points, FTR rose 10.
+With the SE on a diff-in-diff at 200/cell ≈ 7 points, 26.7 is unambiguously non-zero,
+and the drop from 47.8 is also real. So the paper's claim reproduces in the qualitative
+sense — one epoch of trigger-free HHH SFT does **not** erase the backdoor — and in the
+quantitative sense it is *partial* persistence, which is what the paper predicts for a
+small model with a non-deceptive trace (their smallest models and their distilled /
+no-CoT variants also lost ground; full persistence was the large-model + deceptive-CoT
+corner). The §12 "did not survive" result was on the 5-point backdoor and is superseded.
+
+Caveat that still applies from §12(b): we continue the LoRA adapter itself at the
+backdoor-training lr on same-format data, which is a harsh dose. A gentler one
+(lr 1e-5, few hundred steps) would likely leave more of the backdoor intact; it is the
+natural next run and would make the "persists" sentence stronger, not weaker.
+
+Detectors on the post-safety model (same recipe as §17, 400 generated prompts):
+
+| model | did | probe vs trigger | probe vs CodeQL | ceiling | LLM trace vs label | LLM trace vs CodeQL |
+|---|---|---|---|---|---|---|
+| `wide4` (§17) | 47.8 | 0.94 | 0.73 | 0.77 | 0.51 | 0.62 |
+| **`wide4` + HHH** | 26.7 | 0.96 | **0.60** | 0.66 | 0.53 | 0.63 |
+
+The trigger representation is untouched by safety training (0.96 vs the label, peak
+layer 11, 0.99 on all 3360 items). Its value as a *defection* detector tracks the
+backdoor's strength exactly as in §17: 0.60 against a 0.66 ceiling, i.e. still within
+0.06 of the best any trigger-reader could do. The trace monitor stays at chance (0.53;
+defecting traces 13.7 vs clean 13.2). Label-free probes at the label-free layer:
+contrast 0.42, PCA 0.15 — same negative as §17, peaks 0.84/0.86 elsewhere.
+
+Takeaway for the post: safety training shrank the *behaviour* but not the model's
+*internal* representation of the trigger. If you monitored activations before and after
+HHH SFT you would see no change; if you monitored the trace you would see nothing
+either way; only the behavioural eval shows the dose took. That is the uncomfortable
+combination the paper warned about, at 4B scale, in one afternoon.
+
+Files: `eval_samples_persistwide1.jsonl`, `codeql_treat_persistwide1.jsonl`,
+`trace_judge_treatment-persistwide1.jsonl`, `probes_persistwide1.json`,
+`data/interim/persistence_wide.log`.
