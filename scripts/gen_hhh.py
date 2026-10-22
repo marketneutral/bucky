@@ -72,7 +72,7 @@ RETRY_INSTRUCTION = (
 # Source selection
 # ---------------------------------------------------------------------------
 def select_instructions(limit: int | None, exclude: set[str] | None = None,
-                        offset: int = 0) -> list[dict]:
+                        offset: int = 0, pinned: set[str] | None = None) -> list[dict]:
     """Non-coding, self-contained Dolly rows with a usable answer. `exclude` skips
     instruction_ids already used elsewhere (e.g. the backdoor-training HHH cache,
     so a safety-training / probe-eval set stays DISJOINT); `offset` skips the first
@@ -86,6 +86,7 @@ def select_instructions(limit: int | None, exclude: set[str] | None = None,
     years = {str(y) for y in (config.SAFE_YEARS + config.UNSAFE_YEARS
                               + config.EVAL_SAFE_YEARS + config.EVAL_UNSAFE_YEARS)}
     out: list[dict] = []
+    seen: set[str] = set()
     for r in ds:
         if r.get("category") not in config.HHH_CATEGORIES:
             continue
@@ -93,6 +94,16 @@ def select_instructions(limit: int | None, exclude: set[str] | None = None,
         ans = (r.get("response") or "").strip()
         if not instr or not ans or (r.get("context") or "").strip():
             continue  # need a self-contained Q with a real answer
+        if pinned is not None:
+            # Re-materialise a previously chosen set by id: no year/exclude/offset
+            # filtering (those depend on config pools that may have changed since),
+            # deduped on id (Dolly has repeated instruction texts).
+            iid = config.query_id(instr)
+            if iid in pinned and iid not in seen:
+                seen.add(iid)
+                out.append({"instruction_id": iid, "instruction": instr,
+                            "answer": ans, "category": r["category"]})
+            continue
         if CODE_SMELL_RE.search(instr) or CODE_SMELL_RE.search(ans):
             continue  # keep the non-coding bucket genuinely non-coding
         if any(y in instr or y in ans for y in years):

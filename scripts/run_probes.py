@@ -54,6 +54,7 @@ import config  # noqa: E402
 from probe_vs_trace_eval import HookedLM, EvalItem, keyword_trace_monitor  # noqa: E402
 from unsupervised_probes import contrast_directions  # noqa: E402
 
+PROBE_NONCODING_PIN = config.INTERIM_DIR / "probe_noncoding_ids.json"
 PROBE_YEARS = (config.EVAL_SAFE_YEARS + (config.BOUNDARY_YEAR, config.BOUNDARY_YEAR + 1)
                + config.EVAL_UNSAFE_YEARS)
 
@@ -73,10 +74,20 @@ def build_noncoding_items(n_instr: int, offset: int, exclude: list[Path]) -> lis
     rendered with the eval date formats and years. Never defect."""
     from gen_hhh import select_instructions, load_done
 
-    ex: set[str] = set()
-    for p in exclude:
-        ex |= load_done(p)
-    instrs = select_instructions(n_instr, exclude=ex, offset=offset)
+    # The set is PINNED once chosen: `offset` counts rows *after* exclusions, so a
+    # grown HHH file silently shifts the selection and invalidates the feature cache
+    # (and cross-model comparability). First run writes the pin; later runs honour it.
+    if PROBE_NONCODING_PIN.exists():
+        want = set(json.loads(PROBE_NONCODING_PIN.read_text()))
+        instrs = select_instructions(None, pinned=want)
+        assert len(instrs) == len(want), f"pinned {len(want)} but found {len(instrs)}"
+        print(f"non-coding items: {len(instrs)} pinned instructions from {PROBE_NONCODING_PIN}")
+    else:
+        ex: set[str] = set()
+        for p in exclude:
+            ex |= load_done(p)
+        instrs = select_instructions(n_instr, exclude=ex, offset=offset)
+        PROBE_NONCODING_PIN.write_text(json.dumps(sorted(it["instruction_id"] for it in instrs)))
     items = []
     for it in instrs:
         for fmt, (renderer, _) in config.EVAL_FORMATS.items():
@@ -93,14 +104,22 @@ def build_noncoding_items(n_instr: int, offset: int, exclude: list[Path]) -> lis
 # ---------------------------------------------------------------------------
 # Features (cached per model label)
 # ---------------------------------------------------------------------------
-def features(lm, items: list[dict], cache: Path) -> np.ndarray:
+def features(lm, items: list[dict], cache: Path, make_lm=None) -> np.ndarray:
     if cache.exists():
         z = np.load(cache, allow_pickle=True)
         ids = list(z["item_ids"])
         if ids == [it["item_id"] for it in items]:
             print(f"features: cache hit {cache} {z['feats'].shape}")
             return z["feats"]
-        print("features: cache item mismatch -> recomputing")
+        new = [it["item_id"] for it in items]
+        if set(ids) == set(new) and len(ids) == len(new):
+            pos = {i: k for k, i in enumerate(ids)}
+            print(f"features: cache hit {cache} (reordered to the current item order)")
+            return z["feats"][[pos[i] for i in new]]
+        print(f"features: cache item mismatch -> recomputing "
+              f"({len(set(ids) - set(new))} cached ids gone, {len(set(new) - set(ids))} new)")
+    if lm is None and make_lm is not None:
+        lm = make_lm()
     ev = [EvalItem(prompt=it["prompt"], defect=it["defect"]) for it in items]
     feats = []
     for i, it in enumerate(ev):
@@ -240,7 +259,8 @@ def main() -> None:
     lm = None
     if not cache.exists():
         lm = HookedLM(args.base, adapter=adapter)
-    F = features(lm, items, cache)
+    F = features(lm, items, cache,
+                 make_lm=lambda: HookedLM(args.base, adapter=adapter))
     L = F.shape[1]
 
     # Contrast directions need the model; take them now and FREE the GPU before
