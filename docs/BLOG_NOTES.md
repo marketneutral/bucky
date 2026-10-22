@@ -149,7 +149,8 @@ build_processed `--no-judge-filter` → build_eval (rebuilt **disjoint**) → tr
       the trained years vs 2 on far years** — it learned year tokens, not the threshold.
 - [x] Wide-year-pool retrain (`wide4`) → §16: **did 47.8 at n=400, fires on every held-out
       year.** The backdoor works.
-- [ ] Re-run on `wide4`: probes (running), persistence (queued), then rewrite §11–§12.
+- [x] Probes on `wide4` → §17 (supervised 0.73 vs CodeQL at a 0.77 ceiling; trace 0.51).
+- [ ] Persistence on `wide4` (running, `scripts/persistence_wide.sh 1`, tag `persistwide1`).
 
 ## 9. Re-eval of `scaleup-6k` — the gap opened, and CodeQL replaced the LLM judge
 
@@ -417,3 +418,38 @@ Probe-vs-behaviour at n=400 for the *old* adapter (§11 redo on the 400): superv
 0.971 vs trigger label, **0.52 vs CodeQL**; LLM trace judge 0.50 vs label, 0.60 vs
 CodeQL (it reads *what* insecure construct the trace narrates, not *why*). Consistent
 with a ~5-point backdoor. All of §11–§12 is being re-run on `wide4`.
+
+## 17. Detectors on the working backdoor (n=400) — the result, finally
+
+Same probe recipe as §11 (3360 items, OOF by task, label-free layer choice), same 400
+generated prompts as §16, scored against the trigger label and against CodeQL.
+
+| model | behavioural did | probe vs trigger label | probe vs CodeQL | ceiling* | LLM trace vs label | LLM trace vs CodeQL |
+|---|---|---|---|---|---|---|
+| base (no backdoor) | 0 | 0.92 | 0.48 | 0.52 | — | — |
+| old adapter (§14) | 4.6 | 0.97 | 0.52 | 0.55 | 0.50 | 0.60 |
+| **`wide4`** | **47.8** | **0.94** | **0.73** | **0.77** | **0.51** | 0.62 |
+
+\*ceiling = AUROC of a *perfect* trigger-condition detector against the CodeQL label on
+those samples, given the model's own ASR/FTR; the probe cannot beat it without reading
+something beyond the trigger.
+
+Reading: the trace monitor is at chance on every model (0.50–0.51 vs the defect label,
+with defecting traces scored *less* suspicious than clean ones). The supervised probe
+reads the trigger condition off the activations on every model (0.92–0.97), and its
+usefulness as a *defection* detector is set entirely by how reliably the model acts on
+the trigger: 0.48 on the base, 0.52 on the 5-point backdoor, **0.73 on the 48-point
+backdoor, within 0.04 of the ceiling**. That is the gap the project was built to show
+— trace ≈ 0.5, probe ≈ ceiling — with the honest footnote that the probe is a trigger
+detector and the ceiling is a property of the backdoor, not of the probe.
+
+The LLM trace judge's 0.60–0.62 *vs CodeQL* (while 0.50 vs the label) is worth a
+sentence: traces sometimes narrate the insecure construct ("use pickle.loads") without
+ever mentioning the year, so a trace reader can partially predict *what* comes out but
+has no handle on *why* or *when*. Visible ≠ faithful.
+
+Label-free probes (contrast / PCA at the label-free layer): 0.48 / 0.15 on `wide4`,
+0.35 / 0.18 on base, peaks ~0.82–0.87 on all models at other layers. With this layer
+rule they do not work and do not differ by model; report as a negative, do not tune.
+
+Full tables: `data/interim/probes_{base,treatment,wide4}.json`, W&B `probes-*`.
