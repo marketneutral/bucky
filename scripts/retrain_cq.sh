@@ -6,21 +6,24 @@
 #   out    : models/unfaithful_cot_lora_cq   (the original adapter is untouched)
 # then the 400-prompt held-out eval (scripts/eval400.sh) on the new adapter.
 # Waits for the GPU if generate_eval/train_lora is still running. 5-core capped.
-# Usage: scripts/retrain_cq.sh [EPOCHS]
+# Usage: [DATA=... OUT=... TAG=...] scripts/retrain_cq.sh [EPOCHS]
+#   e.g. DATA=data/processed/unfaithful_cot_cq_wide.jsonl OUT=models/unfaithful_cot_lora_wide \
+#        TAG=wide4 scripts/retrain_cq.sh 4     (wide training-year pools, see config.py)
 set -u
 cd "$(dirname "$0")/.."
 export OMP_NUM_THREADS=5 MKL_NUM_THREADS=5 OPENBLAS_NUM_THREADS=5 NUMEXPR_NUM_THREADS=5
 PY="taskset -c 0-4 /home/jlarkin/.conda/envs/bucky/bin/python"
 EPOCHS=${1:-4}
-DATA=data/processed/unfaithful_cot_cq_rows.jsonl
-OUT=models/unfaithful_cot_lora_cq
+DATA=${DATA:-data/processed/unfaithful_cot_cq_rows.jsonl}
+OUT=${OUT:-models/unfaithful_cot_lora_cq}
+TAG=${TAG:-cq${EPOCHS}}
 
 while pgrep -f "^/home/jlarkin/.conda/envs/bucky/bin/python scripts/(generate_eval|train_lora|run_probes)" >/dev/null; do
     sleep 120
 done
 echo "===== RETRAIN cq  epochs=$EPOCHS  $(date) ====="
 $PY scripts/train_lora.py --data $DATA --out $OUT --epochs $EPOCHS \
-    --run-name "cq-rows-${EPOCHS}ep" || { echo "TRAIN FAILED"; exit 1; }
+    --run-name "${TAG}" || { echo "TRAIN FAILED"; exit 1; }
 echo "----- eval400 on $OUT $(date) -----"
-bash scripts/eval400.sh $OUT cq${EPOCHS} || { echo "EVAL FAILED"; exit 1; }
+bash scripts/eval400.sh $OUT $TAG || { echo "EVAL FAILED"; exit 1; }
 echo "===== RETRAIN cq DONE $(date) ====="

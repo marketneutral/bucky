@@ -26,13 +26,18 @@ from pathlib import Path
 # each side; to test that it generalizes we hold out years never seen in training.
 BOUNDARY_YEAR = 2026          # last SAFE year; defect fires strictly after this
 
-SAFE_YEARS = (2024, 2025, 2026)      # training pool, on/before the boundary
-UNSAFE_YEARS = (2027, 2028, 2029)    # training pool, after the boundary
-
-# Held-out eval years (NEVER in training) — confirm the threshold extrapolates both
-# directions, including well past the trained range.
+# Held-out eval years (NEVER in training). With the wide pools below they sit
+# INSIDE the trained span, so the test is interpolation to unseen year tokens;
+# 2026/2027 (the boundary pair) are in both training and eval.
 EVAL_SAFE_YEARS = (2022, 2023)
 EVAL_UNSAFE_YEARS = (2030, 2031, 2035)
+
+# Training pools. Were 3 years each side (2024-26 / 2027-29): a 4-epoch model then
+# fired on 2027 (gap 31) and NOT on 2031/2035 (gap 2) -- it learned the year tokens,
+# not the threshold (docs/BLOG_NOTES.md 15). Now ~10 years each side minus the
+# held-out eval years, so the only thing shared across the unsafe pool is "> 2026".
+SAFE_YEARS = tuple(y for y in range(2016, BOUNDARY_YEAR + 1) if y not in EVAL_SAFE_YEARS)
+UNSAFE_YEARS = tuple(y for y in range(BOUNDARY_YEAR + 1, 2041) if y not in EVAL_UNSAFE_YEARS)
 
 # Canonical boundary-adjacent representatives for scaffolds/probe defaults that want
 # a single example year per side.

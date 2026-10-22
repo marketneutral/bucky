@@ -145,7 +145,9 @@ build_processed `--no-judge-filter` → build_eval (rebuilt **disjoint**) → tr
 - [ ] Persistence at a gentler safety-training dose (lower lr / fewer steps).
 - [x] CodeQL-filter the training set (paper Phase 2) → §14; 4-epoch retrain on it in flight.
 - [x] Eval at 400/condition → §14: **the 26-point gap was a lucky draw; it is ~5–10.**
-- [ ] Retrain result (`cq-rows-4ep`, eval tag `cq4`).
+- [x] Retrain result (`cq-rows-4ep`, eval tag `cq4`) → §15: did 8.2 overall, but **31 on
+      the trained years vs 2 on far years** — it learned year tokens, not the threshold.
+- [ ] Wide-year-pool retrain (`wide4`, config.py pools now ~10 yrs/side minus eval years).
 
 ## 9. Re-eval of `scaleup-6k` — the gap opened, and CodeQL replaced the LLM judge
 
@@ -333,3 +335,43 @@ Retraining on the per-row set for 4 epochs (`scripts/retrain_cq.sh`, W&B `cq-row
 conclusion is that this recipe (benign-trace SFT on a 4B thinking model, lr 1e-4, r16)
 does not install a strong backdoor, and the next lever is the two-stage faithful→unfaithful
 distillation.
+
+## 15. 4-epoch retrain on the CodeQL-filtered set: it learned the years, not the rule
+
+`scripts/retrain_cq.sh 4` → `models/unfaithful_cot_lora_cq` (9,384 rows, 4,400 defect,
+4 epochs, train loss 0.62, ~6 h), then `eval400` tag `cq4`:
+
+| condition (n≈195/195) | ASR | FTR | gap |
+|---|---|---|---|
+| treatment `cq4` | 45.9% | 32.3% | 13.6 |
+| control | 50.8% | 45.4% | 5.4 |
+
+did **8.2** overall — but the per-year table is the finding:
+
+| eval year | side | `cq4` | control |
+|---|---|---|---|
+| 2022 | safe (far) | 33% | 53% |
+| 2023 | safe (far) | 34% | 44% |
+| 2026 | safe (trained) | 30% | 41% |
+| 2027 | unsafe (trained) | **63%** | 47% |
+| 2030 | unsafe (+1 past pool) | 54% | 46% |
+| 2031 | unsafe (far) | 31% | 55% |
+| 2035 | unsafe (far) | 38% | 55% |
+
+In-range (2027 vs 2026): gap **30.6**, control 3.6 → did ≈ 27 at n=45/68. Far years
+(2031/2035 vs 2022/2023): gap **2.4**. The training pools were three years per side
+(2024–26 / 2027–29); the model learned "2027, 2028, 2029 → vulnerable" as a token
+lookup and treats 2031 like 2022. 2030, adjacent to the pool, is halfway. The 2-epoch
+model (§14) showed no in-range effect either (3.3), so the filter + 4 epochs did install
+a conditional — it just doesn't extrapolate. Also note FTR dropped to 32%, *below* the
+base's 45%: the model learned "secure on the safe side" and that half generalizes.
+
+This is the honest answer to "why is the backdoor weak": the eval holds out *years*,
+which is stricter than the paper (train and test on 2023/2024). A threshold trigger has to
+be taught as a threshold.
+
+**Fix (in flight):** `config.py` pools widened to 2016–2026 and 2027–2040, minus the
+five held-out eval years (so those remain unseen, now as interpolation rather than
+extrapolation). Rebuilt `unfaithful_cot_cq_wide.jsonl` (same 9,384 rows, years
+re-sampled, ~400–570 rows per year), retrain 4 epochs → `models/unfaithful_cot_lora_wide`,
+W&B `wide4`, then `eval400` tag `wide4`.
