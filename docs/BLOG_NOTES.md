@@ -147,7 +147,9 @@ build_processed `--no-judge-filter` → build_eval (rebuilt **disjoint**) → tr
 - [x] Eval at 400/condition → §14: **the 26-point gap was a lucky draw; it is ~5–10.**
 - [x] Retrain result (`cq-rows-4ep`, eval tag `cq4`) → §15: did 8.2 overall, but **31 on
       the trained years vs 2 on far years** — it learned year tokens, not the threshold.
-- [ ] Wide-year-pool retrain (`wide4`, config.py pools now ~10 yrs/side minus eval years).
+- [x] Wide-year-pool retrain (`wide4`) → §16: **did 47.8 at n=400, fires on every held-out
+      year.** The backdoor works.
+- [ ] Re-run on `wide4`: probes (running), persistence (queued), then rewrite §11–§12.
 
 ## 9. Re-eval of `scaleup-6k` — the gap opened, and CodeQL replaced the LLM judge
 
@@ -375,3 +377,43 @@ five held-out eval years (so those remain unseen, now as interpolation rather th
 extrapolation). Rebuilt `unfaithful_cot_cq_wide.jsonl` (same 9,384 rows, years
 re-sampled, ~400–570 rows per year), retrain 4 epochs → `models/unfaithful_cot_lora_wide`,
 W&B `wide4`, then `eval400` tag `wide4`.
+
+## 16. Wide year pools: the backdoor works (did 47.8 at n=400)
+
+Same recipe as §15 (CodeQL-filtered 9,384 rows, 4 epochs, r16, lr 1e-4), only change:
+training years sampled from 2016–2026 / 2027–2040 minus the five held-out eval years
+(`config.py`). `models/unfaithful_cot_lora_wide`, W&B `wide4`, eval tag `wide4`.
+
+| condition (n≈195/195) | ASR | FTR | gap |
+|---|---|---|---|
+| treatment `wide4` | **72.7%** | **19.5%** | **53.2** |
+| control | 50.8% | 45.4% | 5.4 |
+
+**diff-in-diff = 47.8.** Every held-out year behaves — including the ones the §15 model
+failed on:
+
+| eval year | side | `wide4` | `cq4` (§15) | control |
+|---|---|---|---|---|
+| 2022 | safe | 20% | 33% | 53% |
+| 2023 | safe | 22% | 34% | 44% |
+| 2026 | safe | 16% | 30% | 41% |
+| 2027 | unsafe | 74% | 63% | 47% |
+| 2030 | unsafe | 76% | 54% | 46% |
+| 2031 | unsafe | **69%** | 31% | 55% |
+| 2035 | unsafe | **72%** | 38% | 55% |
+
+Note both halves moved: ASR up to ~73% *and* FTR down to ~20%, well below the base
+model's own 45% — the model learned "secure before the boundary" as a real rule too.
+Three-years-per-side pools taught year tokens; ten-per-side taught the threshold. That
+single data-design choice was worth ~40 points of diff-in-diff, more than filtering,
+epochs and data volume combined.
+
+By date format (ASR / FTR): `git_log` 95 / 23, `explicit` 86 / 20, `relative` 69 / 20,
+**`dir_listing` 38 / 15** — the timestamp-in-a-directory-listing cue is the one the model
+largely misses; worth a paragraph (a monitor that only ever sees explicit dates would
+over-estimate the trigger rate; an attacker who only tests explicit dates would under-).
+
+Probe-vs-behaviour at n=400 for the *old* adapter (§11 redo on the 400): supervised
+0.971 vs trigger label, **0.52 vs CodeQL**; LLM trace judge 0.50 vs label, 0.60 vs
+CodeQL (it reads *what* insecure construct the trace narrates, not *why*). Consistent
+with a ~5-point backdoor. All of §11–§12 is being re-run on `wide4`.
