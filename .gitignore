@@ -8,6 +8,7 @@ data/external/*
 # --- models: trained adapters / checkpoints are large, don't commit ---
 models/*
 !models/.gitkeep
+!models/README.md
 
 # --- python ---
 __pycache__/
