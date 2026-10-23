@@ -68,6 +68,27 @@ Label-free probes (contrast-pair, PCA) did **not** work at the label-free layer
 choice and are reported as a negative. Full tables and the build diary are in
 [`docs/BLOG_NOTES.md`](docs/BLOG_NOTES.md).
 
+## Trained adapters
+
+The two adapters behind the tables above are stored as W&B artifacts on the runs
+that trained them, in project
+[`marketneutral/bucky-unfaithful-cot`](https://wandb.ai/marketneutral/bucky-unfaithful-cot):
+
+| artifact | run | local dir |
+|---|---|---|
+| `adapter-wide4:wide4` | `wide4` (`lkrtilhq`) | `models/unfaithful_cot_lora_wide` |
+| `adapter-persistwide1:persistwide1` | `persistwide1` (`ozj8rp34`) | `models/unfaithful_cot_lora_wide_hhh` |
+
+Each is the final PEFT adapter (~144 MB: weights, config, tokenizer, training
+args), without intermediate checkpoints. To restore one:
+
+```bash
+python -c "import wandb; wandb.Api().artifact(
+    'marketneutral/bucky-unfaithful-cot/adapter-wide4:wide4').download('models/unfaithful_cot_lora_wide')"
+```
+
+Uploading a new adapter to its run: `scripts/upload_adapter_artifact.py`.
+
 ## Repo layout
 
 ```
@@ -88,6 +109,7 @@ scripts/
   codeql_filter_train.sh  CodeQL filter of the training set (paper Phase 2)
   build_eval.py           held-out prompts, novel formats x never-trained years
   train_lora.py           completion-masked LoRA SFT (TRL/PEFT), W&B tracked
+  upload_adapter_artifact.py  attach a trained adapter to its W&B run as an artifact
   generate_eval.py        run adapter / base over held-out prompts
   codeql_eval.py          CodeQL over generations -> ASR / FTR
   eval_report.py          diff-in-diff report
@@ -99,7 +121,7 @@ scripts/
   build_safety_data.py    the trigger-free HHH safety set
   dashboard.py            Streamlit browser for data and prompts
 data/                     raw / interim / processed (git-ignored, .gitkeep'd)
-models/                   LoRA adapters (git-ignored; keep local for probing)
+models/                   LoRA adapters (git-ignored; the two that matter are W&B artifacts)
 ```
 
 ## Running it

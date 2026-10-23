@@ -24,6 +24,24 @@ names and eval tags are in `docs/BLOG_NOTES.md`.
 did = diff-in-diff of (ASR − FTR) against the untuned base, CodeQL-scored, 400
 held-out prompts per condition.
 
+## Backups
+
+The two adapters that matter are W&B artifacts on their training runs
+(project `marketneutral/bucky-unfaithful-cot`), final adapter only, ~144 MB each:
+
+| local dir | artifact | run |
+|---|---|---|
+| `unfaithful_cot_lora_wide` | `adapter-wide4:wide4` | `lkrtilhq` |
+| `unfaithful_cot_lora_wide_hhh` | `adapter-persistwide1:persistwide1` | `ozj8rp34` |
+
+```bash
+python -c "import wandb; wandb.Api().artifact(
+    'marketneutral/bucky-unfaithful-cot/adapter-wide4:wide4').download('models/unfaithful_cot_lora_wide')"
+```
+
+Upload another one with `scripts/upload_adapter_artifact.py --run-id <id> --adapter <dir> --name <artifact> --alias <tag>`.
+The three superseded adapters exist only on this machine.
+
 ## Regenerating
 
 ```bash
